@@ -9,6 +9,7 @@ import numpy as np
 from data import paired_files, read_pair
 from sampling import RULE, fixed_coords, gather
 from settings import SETTINGS
+from depth_audit import write_audit
 from prep_preview import previews
 
 PREP_KEYS = ('phase_mask_mode', 'phase_mask_seed', 'phase_grid_xy', 'center_crop_hw', 'expected_hw', 'depth_scale',
@@ -30,7 +31,7 @@ def digest(path):
 
 
 def prepare(c):
-    manifest = dict(rule=RULE, preprocessing=signature(c), train=[])
+    manifest = dict(rule=RULE, preprocessing=signature(c), train=[], skipped_train=[])
     pairs = paired_files(c['train_y'], c['train_depth'])
     root = Path(c['prepared_dir']).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -39,7 +40,8 @@ def prepare(c):
         audit = {}
         y, z, valid, meta = read_pair(image, depth, c, training=True, audit=audit)
         if not valid.any():
-            raise ValueError(f'{depth}: frame has no supervised pixels: {audit}')
+            manifest['skipped_train'].append(audit)
+            continue
         coords = fixed_coords(y.shape, c['phase_mask_seed'], c['phase_grid_xy'])
         path = generation / f'frame_{i:06d}.npz'
         parts, depths, masks = (gather(a, coords) for a in (y, z, valid))
@@ -50,6 +52,10 @@ def prepare(c):
                                       depth_source=str(depth.resolve()), **meta, preview=str((folder / "index.png").relative_to(root)),
                                       sha256=digest(image), depth_audit=audit))
         print(f'{image.name} -> {path.name} ({len(coords)} fixed masks)', flush=True)
+    audits = [row['depth_audit'] for row in manifest['train']] + manifest['skipped_train']
+    write_audit(generation, c, {'train': audits})
+    if not manifest['train']:
+        raise ValueError(f"整个训练集筛选后没有监督点。请核对深度单位、范围和裁剪区域。详见 {generation / 'depth_range_audit.json'}")
     staged = generation / 'manifest.json'
     staged.write_text(json.dumps(manifest, indent=2), encoding='utf8')
     staged.replace(root / 'manifest.json')

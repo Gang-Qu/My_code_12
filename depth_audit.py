@@ -36,7 +36,8 @@ def split_report(rows):
         for key, reduce in [('min_positive_m', min), ('max_positive_m', max)]:
             counts[key] = reduce((r[key] for r in known if r[key] is not None), default=None)
         summary[stage] = dict(frames=len(known), **counts)
-    return dict(frames=len(rows), supervised_pixels=sum(r['supervised_pixels'] for r in rows),
+    return dict(frames=len(rows), retained_frames=sum(r['supervised_pixels'] > 0 for r in rows),
+                supervised_pixels=sum(r['supervised_pixels'] for r in rows),
                 zero_supervision_frames=[r['source'] for r in rows if not r['supervised_pixels']],
                 **summary, per_frame=rows)
 
@@ -52,7 +53,7 @@ def write_audit(folder, c, splits):
         crop = summary.get('crop')
         detail = (f"positive={crop['min_positive_m']}..{crop['max_positive_m']} m, "
                   f"below={crop['below']} above={crop['above']}" if crop else 'pre-filter range unavailable')
-        print(f"Depth audit {name}: {detail}, supervised={summary['supervised_pixels']}", flush=True)
+        print(f"Depth audit {name}: {detail}, supervised={summary['supervised_pixels']}, kept_frames={summary['retained_frames']}/{summary['frames']}", flush=True)
     print(f'Depth audit saved to {path}', flush=True)
     return report
 

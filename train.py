@@ -43,7 +43,7 @@ def training_records(c):
     source = c.get('training_input', 'prepared')
     if source == 'raw':
         return [dict(image=image, depth=depth, sha256=digest(image))
-                for image, depth in paired_files(c['train_y'], c['train_depth'])]
+                for image, depth in paired_files(c['train_y'], c['train_depth'])], []
     if source != 'prepared':
         raise ValueError("training_input must be 'raw' or 'prepared'")
     prep = Path(c['prepared_dir'])
@@ -53,7 +53,7 @@ def training_records(c):
         saved.update(phase_grid_xy=[4, 2], center_crop_hw=None)
     if manifest['rule'] not in (LEGACY_RULE, RULE) or saved != signature(c):
         raise ValueError('Sampling or preprocessing changed. Run prepare_dataset.py again.')
-    return manifest['train']
+    return manifest['train'], manifest.get('skipped_train', [])
 
 
 def audit_training_rows(rows, c, raw):
@@ -93,20 +93,23 @@ def show_progress(epoch, epochs, step, steps, loss, metrics=None):
 
 
 def train(c):
-    rows = training_records(c)
+    rows, skipped_at_prepare = training_records(c)
     raw_input = c.get('training_input', 'prepared') == 'raw'
     sample_online = raw_input or c['phase_mask_mode'] == 'learned'
     pairs = paired_files(c['val_y'], c['val_depth'])
+    run = Path(c['output']) / datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    (run / 'checkpoints').mkdir(parents=True)
+    train_audit = audit_training_rows(rows, c, raw_input)
+    val_audit = [audit_pair(y, z, c, training=False) for y, z in pairs]
+    report = write_audit(run, c, dict(train=train_audit + skipped_at_prepare, val=val_audit))
+    rows = [row for row, info in zip(rows, train_audit) if info['supervised_pixels'] > 0]
+    pairs = [pair for pair, info in zip(pairs, val_audit) if info['supervised_pixels'] > 0]
+    if not rows:
+        raise ValueError(f"整个训练集在裁剪和有效深度筛选后没有监督点。请核对 depth_scale、"
+                         f"depth_min、depth_max 和裁剪区域。详见 {run / 'depth_range_audit.json'}")
     hashes = {row['sha256'] for row in rows}
     if any(digest(image) in hashes for image, _ in pairs):
         raise ValueError('Duplicate measurement across train/test')
-    run = Path(c['output']) / datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    (run / 'checkpoints').mkdir(parents=True)
-    report = write_audit(run, c, dict(train=audit_training_rows(rows, c, raw_input),
-                                      val=[audit_pair(y, z, c, training=False) for y, z in pairs]))
-    empty = report['splits']['train']['zero_supervision_frames']
-    if empty:
-        raise ValueError(f'No supervised pixels in {empty[0]}; see {run / "depth_range_audit.json"}')
     torch.manual_seed(c['seed'])
     device = torch.device(c['device'])
     net = DepthModel(c).to(device)
@@ -153,7 +156,8 @@ def train(c):
                             pred.detach().cpu().numpy(), geometry(raw, c, meta if raw_input else None), c, gt.cpu().numpy(), save_arrays=False)
         path = run / 'checkpoints' / f'epoch_{epoch:03d}.pt'
         torch.save(dict(model=net.state_dict(), config=c, rule=sampling_rule(c), epoch=epoch), path)
-        result = evaluate(net, c, pairs, run/'test'/f'epoch{epoch:03d}', device, epoch)
+        result = evaluate(net, c, pairs, run/'test'/f'epoch{epoch:03d}', device, epoch,
+                          skipped_frames=report['splits']['val']['zero_supervision_frames'])
         show_progress(epoch, c['epochs'], len(rows), len(rows), last_loss, result)
         if c['real_each_epoch']:
             run_real(net, c, run/'real'/f'epoch{epoch:03d}', device)
