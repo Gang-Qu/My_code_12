@@ -55,3 +55,62 @@ def restore(parts, coords, hw):
     good = y >= 0
     index = y[good].long() * w + x[good].long()
     return parts.new_zeros(h*w).scatter(0, index, parts[good]).reshape(h, w)
+
+
+LEARNED_RULE = 'fixed-grid-learned-pair-swaps-v1'
+
+
+class _PairSwap(torch.nn.Module):
+    """One binary decision per disjoint pair at each position of a repeating cell tile."""
+    def __init__(self, count, stride, tile_hw, generator):
+        super().__init__()
+        partners = list(range(count))
+        pair_ids = [0] * count
+        pairs = 0
+        for i in range(count):
+            j = i ^ stride
+            if i < j < count:
+                partners[i], partners[j] = j, i
+                pair_ids[i] = pair_ids[j] = pairs
+                pairs += 1
+        self.register_buffer('partners', torch.tensor(partners), persistent=False)
+        self.register_buffer('pair_ids', torch.tensor(pair_ids), persistent=False)
+        scores = torch.empty(pairs, *tile_hw).uniform_(-.01, .01, generator=generator)
+        self.logits = torch.nn.Parameter(scores)
+
+    def forward(self, values):
+        _, h, w = values.shape[:3]
+        rows = torch.arange(h, device=values.device) % self.logits.shape[1]
+        cols = torch.arange(w, device=values.device) % self.logits.shape[2]
+        logits = self.logits[self.pair_ids[:, None, None], rows[None, :, None], cols]
+        if values.ndim == 4:  # (row,column) must travel with its measurement
+            logits = logits[..., None]
+        partner = values.index_select(0, self.partners)
+        result = torch.where(logits > 0, partner, values)
+        if self.training and torch.is_grad_enabled() and values.is_floating_point():
+            soft = logits.sigmoid()
+            # Hard, exact swap in forward; sigmoid derivative for the discrete decision.
+            result = result + (soft - soft.detach()) * (partner - values).detach()
+        return result
+
+
+class LearnedMask(torch.nn.Module):
+    def __init__(self, grid_xy, tile_hw, seed):
+        super().__init__()
+        for name, shape in [('phase_grid_xy', grid_xy), ('mask_tile_hw', tile_hw)]:
+            if len(shape) != 2 or any(type(n) is not int or n < 1 for n in shape):
+                raise ValueError(f'{name} requires two positive integers')
+        count = grid_xy[0] * grid_xy[1]
+        strides = [1 << i for i in range((count - 1).bit_length())]
+        generator = torch.Generator().manual_seed(seed % (1 << 63))
+        self.stages = torch.nn.ModuleList(
+            _PairSwap(count, stride, tile_hw, generator)
+            for stride in strides + strides[:-1][::-1]
+        )
+
+    def route(self, values, inverse=False):
+        # Disjoint paired swaps are self-inverse; undo the stages in reverse order.
+        stages = reversed(self.stages) if inverse else self.stages
+        for stage in stages:
+            values = stage(values)
+        return values

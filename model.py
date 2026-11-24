@@ -20,7 +20,7 @@ from torch.utils.checkpoint import checkpoint
 from torch.nn import functional as F
 
 from data import model_input
-from sampling import restore
+from sampling import LearnedMask, fixed_coords, restore
 
 SPECS = {'vits': (64, [48, 96, 192, 384]), 'vitb': (128, [96, 192, 384, 768]),
          'vitl': (256, [256, 512, 1024, 1024])}
@@ -39,6 +39,17 @@ class DepthModel(nn.Module):
             state = torch.load(c['da_weights'], map_location='cpu', weights_only=True)
             self.da.load_state_dict(state.get('state_dict', state), strict=True)
         self.checkpoint_activations = c.get('checkpoint_da_activations', False)
+        self.grid_xy = tuple(c.get('phase_grid_xy', (4, 2)))
+        self.register_buffer('_base_grid', None, persistent=False)
+        self._grid_key = None
+        self.mask_seed = c['phase_mask_seed']
+        if type(self.mask_seed) is not int or self.mask_seed < 0:
+            raise ValueError('phase_mask_seed must be a nonnegative integer')
+        self.mask_mode = c['phase_mask_mode']
+        if self.mask_mode not in ('fixed', 'learned'):
+            raise ValueError("phase_mask_mode must be 'fixed' or 'learned'")
+        self.mask = (LearnedMask(self.grid_xy, c['mask_tile_hw'], self.mask_seed)
+                     if self.mask_mode == 'learned' else None)
         self.coord_embed = None
         if c['use_coordinate_prior']:
             self.coord_embed = nn.Conv2d(2, self.da.pretrained.embed_dim, 14, stride=14, bias=False)
@@ -60,7 +71,7 @@ class DepthModel(nn.Module):
             tokens = self.coord_embed(xy).flatten(2).transpose(1, 2)
         return self.da(x, coord_tokens=tokens)[:, :h, :w].float()
 
-    def forward(self, parts, coords, hw, chunk=1):
+    def _predict_all_parts(self, parts, coords, hw, chunk):
         preds = []
         for y, pos in zip(parts.split(chunk), coords.split(chunk)):
             if self.checkpoint_activations and self.training and torch.is_grad_enabled():
@@ -68,9 +79,50 @@ class DepthModel(nn.Module):
             else:
                 depth = self.predict_parts(y, pos, hw)
             preds.append(depth)
-        coarse = restore(torch.cat(preds), coords, hw)
+        return torch.cat(preds)
+
+    def _base_coords(self, hw, device):
+        key = (tuple(hw), self.mask_seed, self.grid_xy)
+        device = torch.device(device)
+        if self._grid_key != key or self._base_grid.device != device:
+            self._base_grid = torch.from_numpy(fixed_coords(hw, self.mask_seed, self.grid_xy)).to(device)
+            self._grid_key = key
+        return self._base_grid
+
+    def sampling_coords(self, hw, device):
+        base = self._base_coords(hw, device)
+        return self.mask.route(base) if self.mask is not None else base
+
+    def forward_frame(self, frame, chunk=1, return_coords=False):
+        hw = frame.shape
+        base = self._base_coords(hw, frame.device)
+        coords = self.mask.route(base) if self.mask is not None else base
+        # Training differentiates both the split and its inverse. Deployment needs
+        # only the final integer coordinates: a single gather and inverse scatter.
+        train_mask = self.mask is not None and self.training and torch.is_grad_enabled()
+        scatter_coords = base if train_mask else coords
+        rows, cols = scatter_coords.unbind(-1)
+        parts = frame[rows.clamp_min(0).long(), cols.clamp_min(0).long()].masked_fill(rows < 0, 0)
+        if train_mask:
+            parts = self.mask.route(parts)
+        preds = self._predict_all_parts(parts, coords, hw, chunk)
+        if train_mask:
+            preds = self.mask.route(preds, inverse=True)
+        final = self._refine(restore(preds, scatter_coords, hw), frame)
+        return (final, coords) if return_coords else final
+
+    def forward(self, parts, coords, hw, chunk=1):
+        """Compatibility with prepared, fixed partitions."""
+        if self.mask is not None:
+            raise ValueError('Learnable masks require forward_frame on the raw image')
+        pred = self._predict_all_parts(parts, coords, hw, chunk)
+        coarse = restore(pred, coords, hw)
         if self.refiner is None:
             return coarse
-        y = restore(parts, coords, hw)
+        return self._refine(coarse, restore(parts, coords, hw))
+
+    def _refine(self, coarse, y):
+        if self.refiner is None:
+            return coarse
         residual = self.refiner(torch.stack((coarse, y))[None])
         return coarse + residual[0, 0].float()

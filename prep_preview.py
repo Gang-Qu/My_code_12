@@ -16,7 +16,7 @@ def panel(y, z, valid, c):
 
 
 def previews(folder, number, y, z, valid, parts, depths, masks, c):
-    folder.mkdir()
+    folder.mkdir(exist_ok=True)
     panel(y, z, valid, c).save(folder/'crop.png')
     count = len(parts)
     cols = min(c['phase_grid_xy'][0], 6)

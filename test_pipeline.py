@@ -44,7 +44,7 @@ class PipelineTest(unittest.TestCase):
     def test_train_test_and_real(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            c = dict(SETTINGS, prepared_dir=tmp+'/prep', output=tmp+'/out', device='cpu',
+            c = dict(SETTINGS, training_input='prepared', prepared_dir=tmp+'/prep', output=tmp+'/out', device='cpu',
                      expected_hw=[56, 84], center_crop_hw=[51, 73], phase_grid_xy=[3, 2], checkpoint_da_activations=True, da_weights=tmp+'/da.pth', epochs=1, real_dir=tmp+'/real',
                      real_each_epoch=True, freeze_da=True, use_coordinate_prior=True, use_refiner=True)
             for split, hw in [('train', (65, 85)), ('val', (61, 97))]:

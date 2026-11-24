@@ -16,11 +16,12 @@ PREP_KEYS = ('phase_mask_mode', 'phase_mask_seed', 'phase_grid_xy', 'center_crop
 
 
 def signature(c):
-    if c['phase_mask_mode'] != 'fixed':
-        raise ValueError("My_code_12 requires phase_mask_mode='fixed'")
+    if c['phase_mask_mode'] not in ('fixed', 'learned'):
+        raise ValueError("Unknown phase_mask_mode")
     if type(c['phase_mask_seed']) is not int or c['phase_mask_seed'] < 0:
         raise ValueError('phase_mask_seed must be a nonnegative integer')
-    return {key: c[key] for key in PREP_KEYS}
+    # Optional NPZ always stores the fixed, lossless base partition.
+    return {**{key: c[key] for key in PREP_KEYS}, 'phase_mask_mode': 'fixed'}
 
 
 def digest(path):

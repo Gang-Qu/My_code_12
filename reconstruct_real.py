@@ -7,26 +7,32 @@ import torch
 from data import image_files, measurement, resize_measurement, center_region
 from model import DepthModel
 from outputs import save_result
-from sampling import RULE, LEGACY_RULE, fixed_coords, gather
+from sampling import RULE, LEGACY_RULE, LEARNED_RULE
 from settings import SETTINGS
 
 CHECKPOINT = 'output/run/checkpoints/epoch_001.pt'
 
 
 @torch.no_grad()
-def reconstruct(net, y, c, device):
-    coords = fixed_coords(y.shape, c['phase_mask_seed'], c.get('phase_grid_xy', (4, 2)))
-    parts = torch.from_numpy(gather(y, coords)).to(device)
-    positions = torch.from_numpy(coords).to(device)
-    z = net(parts, positions, y.shape, c['inference_batch_size'])
+def reconstruct(net, y, c, device, return_coords=False):
+    image = torch.from_numpy(y).to(device)
+    result = net.forward_frame(image, c['inference_batch_size'], return_coords=return_coords)
+    z = result[0] if return_coords else result
     if not z.isfinite().all():
         raise FloatingPointError('Nonfinite full-frame depth')
-    return z.cpu().numpy()
+    pred = z.cpu().numpy()
+    return (pred, result[1].cpu().numpy()) if return_coords else pred
+
+
+def sampling_rule(c):
+    if c['phase_mask_mode'] == 'learned':
+        return LEARNED_RULE
+    return RULE if 'phase_grid_xy' in c else LEGACY_RULE
 
 
 def geometry(y, c, meta=None):
     return {'hw': list(y.shape), **(meta or {}),
-            'rule': RULE if 'phase_grid_xy' in c else LEGACY_RULE,
+            'rule': sampling_rule(c),
             'phase_grid_xy': c.get('phase_grid_xy', [4, 2]),
             'coordinate_origin': 'crop top-left, zero-based y,x'}
 
@@ -46,7 +52,7 @@ def run_real(net, c, folder, device):
 
 def load_checkpoint(path, device):
     ck = torch.load(path, map_location='cpu', weights_only=True)
-    if ck['rule'] not in (RULE, LEGACY_RULE) or ck['config']['phase_mask_mode'] != 'fixed':
+    if ck['rule'] != sampling_rule(ck['config']):
         raise ValueError('Incompatible sampling rule')
     net = DepthModel(ck['config'], load_pretrained=False)
     net.load_state_dict(ck['model'], strict=True)

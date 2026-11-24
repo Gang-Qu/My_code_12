@@ -6,7 +6,12 @@ SETTINGS = dict(
     center_crop_hw=[1036, 2072],  # H,W after resize; None keeps the full grid
     resize_before_inference_crop=False,  # test/real: center crop native input by default
     phase_grid_xy=[4, 2],  # horizontal, vertical; produces 4*2 subimages
-    phase_mask_mode='fixed', phase_mask_seed=41,
+    training_input='raw',  # 'raw' or existing 'prepared' fixed-mask NPZ
+    phase_mask_mode='fixed', phase_mask_seed=41,  # 'fixed' or 'learned'
+    mask_tile_hw=[16, 16],  # in grid cells; learned switches shared across frames
+    lr_mask=1e-3,
+    save_sampling_preview=True,  # first raw test frame of each epoch
+
     black_level=0., white_level=None, gain=1., input_encoding='linear',
     depth_scale=1., depth_min=.5, depth_max=5.,
     encoder='vits', metric_max_depth=20.,

@@ -69,7 +69,7 @@ def resize_measurement(y, valid, expected_hw):
     size = (width, height)
     if y.shape != (height, width):
         bilinear = Image.Resampling.BILINEAR
-        y = np.asarray(Image.fromarray(y).resize(size, bilinear))
+        y = np.array(Image.fromarray(y).resize(size, bilinear))
         # Conservatively exclude any measurement influenced by invalid source pixels.
         invalid = (~valid).astype(np.float32)
         valid = np.asarray(Image.fromarray(invalid).resize(size, bilinear)) == 0

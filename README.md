@@ -1,15 +1,34 @@
-# My_code_12 · 可配置固定掩码的 DA 米制深度重建
+# My_code_12 · 在线采样与可学习掩码的 DA 米制深度重建
 
 输入一幅测量大图，输出同一坐标系的一幅米制深度图。主网络沿用 My_code_10 的 Depth Anything V2 metric 架构，包括 DINOv2 编码器、原有位置编码和 DPT 深度头。默认严格加载官方 Hypersim ViT-S 权重。坐标先验和整图整合默认均关闭，可以独立开启。
+
+## 直接读大图训练，让掩码随深度损失学习
+
+**可以跳过 `prepare_dataset.py`。** 默认 `training_input='raw'` 直接读取同名测量图和深度 TIFF，按同一几何配置 resize、中心裁剪，再在本次前向中分配像素。固定掩码仍是默认基线。要训练掩码，在 `settings.py` 的 `SETTINGS` 中填写数据和 DA 权重路径，并设置下面几项，然后运行 `python train.py`。
+
+```python
+training_input='raw',
+phase_grid_xy=[3, 2],       # 横向 3、纵向 2，每幅图得到 6 张子图
+phase_mask_mode='learned',
+phase_mask_seed=41,
+mask_tile_hw=[16, 16],      # 高、宽，以采样单元计
+lr_mask=1e-3,
+```
+
+**掩码如何学习。** 给定 `phase_grid_xy=[a,b]`，每个 b 行 × a 列单元内的 N=a×b 个位置先按种子分给 N 张子图。可学习模式在此基础上增加若干层成对交换，同一对位置共享一个二元决定。交换参数按 N 和 `mask_tile_hw` 创建，独立随机初始化为接近零的实数；每个单元按自身在参数网格中的行列取值，跨图共享，在较大图上重复使用这些参数。前向按参数是否大于零选择保留或交换，所以每个真实像素始终恰好出现一次。非二次幂的 N 同样支持，每层未配对的位置直接通过。N=1 时只有一种布局。
+
+**梯度与验证。** 训练使用直通估计器，用 sigmoid 的导数近似二元选择的梯度；测量分组和深度逆回填两处都参与反传。GT 和有效性掩码留在中心裁剪的原坐标系，位置先验使用本次实际选中的整数坐标。可设置 `freeze_da=True` 并关闭坐标先验、整合器，单独检验学习采样的贡献（N>1）。这仍是对已完整读入的测量做软件分组。要判断收益，用相同数据、DA 初始化及更新预算比较 `fixed` 与 `learned` 的测试 MAE 和 3% 命中率。
+
+**测试和实拍。** 将 `reconstruct_real.py` 中的 `CHECKPOINT` 指向本轮保存的权重，带真值测试运行 `python evaluate.py`，实拍运行 `python reconstruct_real.py`。checkpoint 包含掩码参数、网格、种子、规则版本和 DA 权重。推理从中恢复确定的整数坐标，对裁剪大图采样，逐子图预测米制深度，再按相同坐标回填。`save_sampling_preview=True` 会在每轮首幅测试图的 `sampling_N_parts/` 下保存编号子图、整组预览和实际使用的 `coords_yx.npy`，可与重载 checkpoint 后生成的坐标逐点核对。[采样实现](sampling.py) · [训练入口](train.py) · [权重回放测试](test_learned_mask.py)
 
 ## 准备训练数据并运行
 
 1. 安装适配设备的 PyTorch 和仓库依赖。在 `settings.py` 填写 `train_y`、`train_depth`、`val_y`、`val_depth`。同一场景的测量图与单通道深度 TIFF 使用同一文件名主干，二者须已配准。深度单位是米时用 `depth_scale=1`，毫米时用 `0.001`。
-2. 运行 `python prepare_dataset.py`。训练测量按 `expected_hw` 双线性缩放，深度按最近邻缩放；尺寸相同直接使用，设为 `None` 可保留原始网格。RGB/RGBA 使用原辐射配置转为灰度。生成目录默认是 `data/prepared_12`，每幅训练图保存一个 NPZ，并在全部成功后更新清单。My_code_10 的规则相位缓存需要从原图重新生成。
+2. 默认直接读原图。若希望复用磁盘缓存，可先运行 `python prepare_dataset.py`，再设 `training_input='prepared'`。缓存保存固定基础分组及坐标。使用可学习掩码时，训练从缓存还原裁剪测量，再应用当前掩码。两条入口沿用相同的灰度转换、米制单位和有效像素规则。
 3. 把官方室内米制权重路径填入 `da_weights`，从仓库根目录运行 `python train.py`。训练入口要求权重参数名和形状完全匹配。每步使用同一幅图的全部子图；`batch_size` 控制单次 DA 前向的子图数，整帧回填后计算米制 L1 和可选的邻接梯度损失。显存紧张时可设 `batch_size=1`、`checkpoint_da_activations=True`，后者在反传时重算前向。模型选择及权重哈希见[官方权重来源](da_vendor/PROVENANCE.md)。
 4. 每轮直接从 `val_y`、`val_depth` 读取测试大图，对测量与配准深度作相同中心裁剪，在裁剪网格采样、重建和回填。实拍时在 `reconstruct_real.py` 填训练产生的 `CHECKPOINT`，在 `settings.py` 填 `real_dir`，运行 `python reconstruct_real.py` 即可。独立测试入口是 `python evaluate.py`，共用同一 `CHECKPOINT`。实拍和测试从权重恢复模型开关、掩码版本和种子，默认逐张子图前向。每轮实拍可设 `real_each_epoch=True`。
 
-## 先生成数据集并检查子图
+## 可选：预生成固定基础分组并检查子图
 
 在 `settings.py` 中，`expected_hw` 和 `center_crop_hw` 均按 **[高, 宽]** 填写，`phase_grid_xy=[a,b]` 按 **[横向数, 纵向数]** 填写。例如：
 
@@ -28,7 +47,7 @@ phase_grid_xy = [4, 2]
 | `y`、`depth`、`valid` | [a×b, ceil(H/b), ceil(W/a)] | 同一点的测量、米制深度和有效性，H、W 为裁剪后的高宽 |
 | `coords_yx` | [a×b, ceil(H/b), ceil(W/a), 2] | 裁剪网格的零基 [行,列]。有效坐标加上清单的 `crop_origin_yx` 即得缩放网格坐标 |
 
-测试和实拍默认直接从原始大图中心截取 `center_crop_hw`，再按训练记录的布局逐张重建并拼回**裁剪尺寸**保存。如需与训练一致地先缩放再中心裁剪，在训练配置设 `resize_before_inference_crop=True`。原图小于指定裁剪时会报告尺寸；设 `center_crop_hw=None` 则保留当前网格全幅。旧 checkpoint 按原来的全幅八掩码方式重建。
+测试和实拍默认直接从原始大图中心截取 `center_crop_hw`，再按训练记录的布局逐张重建并拼回**裁剪尺寸**保存。如需与训练一致地先缩放再中心裁剪，在训练配置设 `resize_before_inference_crop=True`。原图小于指定裁剪时会报告尺寸；设 `center_crop_hw=None` 则保留当前网格全幅。旧固定掩码 checkpoint 沿用其保存的几何配置；早期缺少网格配置的权重使用原有的全幅八掩码。
 
 ### 已生成的六子图示例
 
@@ -45,10 +64,10 @@ phase_grid_xy = [4, 2]
 | False | True | DA 回填后，用整图测量与粗深度预测深度残差 |
 | True | True | 同时使用坐标编码和整图残差修正 |
 
-开启先验时，每个采样点的真实行、列按该帧高宽分别归一化至 [−1,1]。一个核大小和步长均为 14 的可训练线性卷积将该 DA patch 内所有采样坐标投影到 token 维度，与图像 patch embedding 相加，再经过原有 DINOv2 位置编码和 Transformer。坐标投影零初始化，初始深度与同权重的 DA 基线一致。整合器是三层 3×3 卷积，末层零初始化，输出为粗深度加残差。可用 `freeze_da=True` 只训练已开启的附加模块；两个开关都关闭时须允许至少深度头训练。[模型实现](model.py)
+开启先验时，每个采样点的真实行、列按该帧高宽分别归一化至 [−1,1]。一个核大小和步长均为 14 的可训练线性卷积将该 DA patch 内所有采样坐标投影到 token 维度，与图像 patch embedding 相加，再经过原有 DINOv2 位置编码和 Transformer。坐标投影零初始化，初始深度与同权重的 DA 基线一致。整合器是三层 3×3 卷积，末层零初始化，输出为粗深度加残差。可用 `freeze_da=True` 只训练已开启的附加模块；使用固定掩码且两个模块都关闭时须允许至少深度头训练。[模型实现](model.py)
 
 ## 结果与验证范围
 
 训练预览保存回填后的整图。测试和实拍导出 PNG、米制 TIFF 及 NPZ。每轮测试目录有 `metrics.json` 和 `depth_bins.png`。按真值每 0.1 m 分箱，报告每箱有效像素比例和箱内 `abs(pred−gt)/gt ≤ 0.03` 的比例，总体指标按有效像素汇总。实验对照可固定数据、权重和种子，分别训练上表四种配置。
 
-运行 `python -m unittest discover` 可检验掩码覆盖、坐标回填和反传、开关的初始化等价性，并用临时图像完成一轮 ViT-S 训练、中心裁剪测试和实拍回放。集成测试使用随机初始化的同构 DA 权重文件。当前工作区未提供此次更换的原始配对数据和官方权重，因此已生成并验证默认固定掩码表；实际训练集 NPZ 需在数据所在机器运行预处理，实际深度精度需用该数据衡量。
+运行 `python -m unittest discover` 可检验掩码覆盖、坐标回填和反传、开关的初始化等价性，并用临时图像完成一轮 ViT-S 训练、中心裁剪测试和实拍回放。集成测试使用随机初始化的同构 DA 权重文件。当前工作区未提供此次更换的原始配对数据和官方权重，因此已用合成帧验证固定布局的在线与缓存输出一致、可学习参数能收到梯度并改变取点、重新加载权重后坐标与测试深度可复现。实际精度收益仍需用目标数据衡量。
