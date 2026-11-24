@@ -14,6 +14,8 @@ SETTINGS = dict(
 
     black_level=0., white_level=None, gain=1., input_encoding='linear',
     depth_scale=1., depth_min=.5, depth_max=5.,
+    da_model_type='metric',  # 'metric' or 'relative'
+    relative_da_weights='weights/depth_anything_v2_vits.pth', lr_calibration=1e-3,
     encoder='vits', metric_max_depth=20.,
     da_weights='weights/depth_anything_v2_metric_hypersim_vits.pth',
     use_coordinate_prior=False, use_refiner=False,

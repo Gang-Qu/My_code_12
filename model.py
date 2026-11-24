@@ -26,17 +26,35 @@ SPECS = {'vits': (64, [48, 96, 192, 384]), 'vitb': (128, [96, 192, 384, 768]),
          'vitl': (256, [256, 512, 1024, 1024])}
 
 
+class InverseDepthCalibration(nn.Module):
+    """Shared positive inverse-depth mapping, fitted only on training labels."""
+    def __init__(self):
+        super().__init__()
+        self.raw_gain = nn.Parameter(torch.tensor(-3.))
+        self.bias = nn.Parameter(torch.tensor(-1.5))
+
+    def forward(self, relative):
+        inverse_m = F.softplus(F.softplus(self.raw_gain) * relative.float() + self.bias)
+        return (inverse_m + 1e-6).reciprocal()
+
+
 class DepthModel(nn.Module):
     def __init__(self, c, load_pretrained=True):
         super().__init__()
         features, channels = SPECS[c['encoder']]
-        if not 0 < c['depth_min'] < c['depth_max'] <= c['metric_max_depth']:
+        model_type = c.get('da_model_type', 'metric')
+        if model_type not in ('metric', 'relative'):
+            raise ValueError("da_model_type must be 'metric' or 'relative'")
+        maximum = c['metric_max_depth'] if model_type == 'metric' else None
+        if not 0 < c['depth_min'] < c['depth_max'] or (maximum is not None and c['depth_max'] > maximum):
             raise ValueError('Check metric depth range and depth unit')
         self.da = DepthAnythingV2(encoder=c['encoder'], features=features,
-                                  out_channels=channels, max_depth=c['metric_max_depth'])
+                                  out_channels=channels, max_depth=maximum)
+        self.calibration = InverseDepthCalibration() if model_type == 'relative' else None
         configure_attention(self.da, c['attention_backend'])
         if load_pretrained:
-            state = torch.load(c['da_weights'], map_location='cpu', weights_only=True)
+            weights = c['relative_da_weights'] if model_type == 'relative' else c['da_weights']
+            state = torch.load(weights, map_location='cpu', weights_only=True)
             self.da.load_state_dict(state.get('state_dict', state), strict=True)
         self.checkpoint_activations = c.get('checkpoint_da_activations', False)
         self.grid_xy = tuple(c.get('phase_grid_xy', (4, 2)))
@@ -69,7 +87,8 @@ class DepthModel(nn.Module):
             xy = (2 * coords.float() / scale - 1).masked_fill(coords < 0, 0)
             xy = F.pad(xy.permute(0, 3, 1, 2), pad)
             tokens = self.coord_embed(xy).flatten(2).transpose(1, 2)
-        return self.da(x, coord_tokens=tokens)[:, :h, :w].float()
+        depth = self.da(x, coord_tokens=tokens)[:, :h, :w].float()
+        return self.calibration(depth) if self.calibration is not None else depth
 
     def _predict_all_parts(self, parts, coords, hw, chunk):
         preds = []

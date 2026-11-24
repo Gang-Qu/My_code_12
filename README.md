@@ -2,6 +2,27 @@
 
 输入一幅测量大图，输出同一坐标系的一幅米制深度图。主网络沿用 My_code_10 的 Depth Anything V2 metric 架构，包括 DINOv2 编码器、原有位置编码和 DPT 深度头。默认严格加载官方 Hypersim ViT-S 权重。坐标先验和整图整合默认均关闭，可以独立开启。
 
+## 选择 metric 或 relative 预训练权重
+
+在 `settings.py` 的 `SETTINGS` 中按下表选一种。两条路径都使用同一份米制 GT，在回填后的深度图上计算损失、0.1 m 分箱和 3% 命中率。
+
+| `da_model_type` | 预训练权重设置（以 `encoder='vits'` 为例） | DA 输出及米制转换 |
+|---|---|---|
+| `'metric'`（默认） | `da_weights='weights/depth_anything_v2_metric_hypersim_vits.pth'` | 官方室内头 `20 × sigmoid(logit)`，20 对应该权重的 `metric_max_depth` |
+| `'relative'` | `relative_da_weights='weights/depth_anything_v2_vits.pth'` | 官方 ReLU 头输出相对逆深度，再用从训练集拟合的标定层转换为米 |
+
+两类权重的一些参数名与形状完全相同，务必让权重来源、`encoder` 和模式相符。相对分支严格加载完整编码器及 DPT 头；`metric_max_depth` 仅作用于 metric 分支。[DA V2 官方相对模型与权重](https://github.com/DepthAnything/Depth-Anything-V2#pre-trained-models) · [官方米制模型](https://github.com/DepthAnything/Depth-Anything-V2/tree/main/metric_depth)
+
+相对模式使用所有子图共享的两个标量，将相对输出 `r` 映射为 `D = 1 / (softplus(softplus(g) × r + b) + 1e-6)` 米。这个初始化需要在自己的米制数据上标定。`freeze_da=True` 时仍可用 `lr_calibration` 训练这两个参数；`freeze_da=False` 时可与 DA 联合微调。测试与实拍从训练 checkpoint 恢复模型类型和标定参数。旧 checkpoint 自动使用 metric 路径。共享映射能否适应跨场景尺度变化，应在同一划分上比较两种初始化的测试分箱指标。[模型实现](model.py)
+
+## 训练前审查数据集深度范围
+
+填写数据路径后可单独运行 `python depth_audit.py`，在 `output/depth_range_audit.json` 查看结果。正常训练也会在加载 DA、开始优化前审查 train 和 val 一次，将报告放在本次运行目录。报告同时记录单位换算 `depth_scale`、有效闭区间、逐帧明细和各集合汇总。
+
+- `original` 统计原始深度 TIFF 换算为米、尚未 resize 或过滤的数值。`crop` 统计实际裁剪区域、应用有效性过滤前的数值。两处均报告正有限深度最小值、最大值，以及非有限、非正、低于下界、范围内、高于上界五类像素数。
+- `supervised_pixels` 进一步要求对应测量有效。`zero_supervision_frames` 列出没有监督点的帧；训练帧无监督时，报告先写盘，再提示对应文件。新生成的 prepared 缓存把过滤前的记录保存在清单中。旧缓存仅能核实有效像素数；可用原始 TIFF 单独运行审查。
+- 交互终端在同一行刷新，左侧显示当前帧的 `loss`，右侧显示 epoch、帧计数和本轮百分比，轮末补充测试 MAE 和 3% 命中率。输出重定向到日志时每轮保留一条汇总。
+
 ## 直接读大图训练，让掩码随深度损失学习
 
 **可以跳过 `prepare_dataset.py`。** 默认 `training_input='raw'` 直接读取同名测量图和深度 TIFF，按同一几何配置 resize、中心裁剪，再在本次前向中分配像素。固定掩码仍是默认基线。要训练掩码，在 `settings.py` 的 `SETTINGS` 中填写数据和 DA 权重路径，并设置下面几项，然后运行 `python train.py`。
@@ -42,7 +63,7 @@ lr_mask=1e-3,
 
 1. 安装适配设备的 PyTorch 和仓库依赖。在 `settings.py` 填写 `train_y`、`train_depth`、`val_y`、`val_depth`。同一场景的测量图与单通道深度 TIFF 使用同一文件名主干，二者须已配准。深度单位是米时用 `depth_scale=1`，毫米时用 `0.001`。
 2. 默认直接读原图。若希望复用磁盘缓存，可先运行 `python prepare_dataset.py`，再设 `training_input='prepared'`。缓存保存固定基础分组及坐标。使用可学习掩码时，训练从缓存还原裁剪测量，再应用当前掩码。两条入口沿用相同的灰度转换、米制单位和有效像素规则。
-3. 把官方室内米制权重路径填入 `da_weights`，从仓库根目录运行 `python train.py`。训练入口要求权重参数名和形状完全匹配。每步使用同一幅图的全部子图；`batch_size` 控制单次 DA 前向的子图数，整帧回填后计算米制 L1 和可选的邻接梯度损失。显存紧张时可设 `batch_size=1`、`checkpoint_da_activations=True`，后者在反传时重算前向。模型选择及权重哈希见[官方权重来源](da_vendor/PROVENANCE.md)。
+3. 按所选 DA 类型填写对应的预训练权重路径，从仓库根目录运行 `python train.py`。训练入口要求权重参数名和形状完全匹配。每步使用同一幅图的全部子图；`batch_size` 控制单次 DA 前向的子图数，整帧回填后计算米制 L1 和可选的邻接梯度损失。显存紧张时可设 `batch_size=1`、`checkpoint_da_activations=True`，后者在反传时重算前向。模型选择及权重哈希见[官方权重来源](da_vendor/PROVENANCE.md)。
 4. 每轮直接从 `val_y`、`val_depth` 读取测试大图，对测量与配准深度作相同中心裁剪，在裁剪网格采样、重建和回填。实拍时在 `reconstruct_real.py` 填训练产生的 `CHECKPOINT`，在 `settings.py` 填 `real_dir`，运行 `python reconstruct_real.py` 即可。独立测试入口是 `python evaluate.py`，共用同一 `CHECKPOINT`。实拍和测试从权重恢复模型开关、掩码版本和种子，默认逐张子图前向。每轮实拍可设 `real_each_epoch=True`。
 
 ## 可选：预生成固定基础分组并检查子图
@@ -103,3 +124,5 @@ phase_grid_xy = [4, 2]
 CSV 和 JSON 中比例取 0–1，折线图显示百分数。空箱的命中数为 0，准确率在 CSV 留空、JSON 为 null。例如 1 m 处允许误差为 3 cm，2 m 处为 6 cm。
 
 运行 `python -m unittest discover` 可检验掩码覆盖、坐标回填和反传、开关的初始化等价性，并用临时图像完成一轮 ViT-S 训练、中心裁剪测试和实拍回放。集成测试使用随机初始化的同构 DA 权重文件。当前工作区未提供此次更换的原始配对数据和官方权重，因此已用合成帧验证固定布局的在线与缓存输出一致、可学习参数能收到梯度并改变取点、重新加载权重后坐标与测试深度可复现。实际精度收益仍需用目标数据衡量。
+
+相对分支在 CPU 上使用相同随机 ViT-S 权重及输入与官方相对模型实现比对，原始输出最大绝对差为 0。另已验证标定梯度、冻结 DA 时更新标定层及独立 checkpoint 回放；此次未使用实际预训练文件或用户数据评估精度。

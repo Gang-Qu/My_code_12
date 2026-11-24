@@ -1,6 +1,8 @@
 """Train depth only. A shuffled training example contains one complete fixed partition."""
 from datetime import datetime
 import json
+import shutil
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +10,7 @@ import torch
 
 from data import paired_files, read_pair
 from evaluate import evaluate
+from depth_audit import audit_pair, write_audit
 from metrics import loss_terms, make_amp
 from model import DepthModel
 from outputs import save_result
@@ -25,6 +28,8 @@ def optimizer_for(net, c):
             params = [p for p in module.parameters() if p.requires_grad]
             if params:
                 groups.append(dict(params=params, lr=lr))
+    if net.calibration is not None:
+        groups.append(dict(params=net.calibration.parameters(), lr=c['lr_calibration'], weight_decay=0.))
     if net.mask is not None:
         params = list(net.mask.parameters())
         if params:
@@ -51,6 +56,42 @@ def training_records(c):
     return manifest['train']
 
 
+def audit_training_rows(rows, c, raw):
+    result = []
+    for row in rows:
+        if raw:
+            audit = audit_pair(row['image'], row['depth'], c, training=True)
+        elif 'depth_audit' in row:
+            audit = row['depth_audit']
+        else:
+            # Old caches have already replaced excluded labels by zero.
+            with np.load(Path(c['prepared_dir']) / row['file']) as frame:
+                audit = dict(source=row['file'], supervised_pixels=int(frame['valid'].sum()),
+                             range_status='pre-filter labels unavailable in legacy cache')
+        result.append(audit)
+    return result
+
+
+def show_progress(epoch, epochs, step, steps, loss, metrics=None):
+    tty = sys.stdout.isatty()
+    if not tty and metrics is None:
+        return
+    width = max(1, shutil.get_terminal_size((100, 24)).columns - 1)
+    left = f'loss={loss:.6f}'
+    if metrics is not None:
+        mae, acc = metrics['mae_m'], metrics['accuracy_3pct']
+        detail = (f' test_MAE={mae:.4f} acc3%={acc:.1%}' if mae is not None else ' test=n/a')
+    else:
+        detail = ''
+    right = f'epoch={epoch}/{epochs} frame={step}/{steps} {100*step/steps:.0f}%'
+    if len(left + detail + right) + 2 <= width or not tty:
+        left += detail
+    gap = max(1, width-len(left)-len(right)) if tty else 2
+    line = left + ' '*gap + right
+    last = metrics is not None and epoch == epochs
+    print(('\r' if tty else '') + line, end='\n' if last or not tty else '', flush=True)
+
+
 def train(c):
     rows = training_records(c)
     raw_input = c.get('training_input', 'prepared') == 'raw'
@@ -59,13 +100,18 @@ def train(c):
     hashes = {row['sha256'] for row in rows}
     if any(digest(image) in hashes for image, _ in pairs):
         raise ValueError('Duplicate measurement across train/test')
+    run = Path(c['output']) / datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    (run / 'checkpoints').mkdir(parents=True)
+    report = write_audit(run, c, dict(train=audit_training_rows(rows, c, raw_input),
+                                      val=[audit_pair(y, z, c, training=False) for y, z in pairs]))
+    empty = report['splits']['train']['zero_supervision_frames']
+    if empty:
+        raise ValueError(f'No supervised pixels in {empty[0]}; see {run / "depth_range_audit.json"}')
     torch.manual_seed(c['seed'])
     device = torch.device(c['device'])
     net = DepthModel(c).to(device)
     opt = optimizer_for(net, c)
     amp, dtype, scaler = make_amp(c, device)
-    run = Path(c['output']) / datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    (run / 'checkpoints').mkdir(parents=True)
     for epoch in range(1, c['epochs'] + 1):
         net.train()
         if c['freeze_da']:
@@ -98,7 +144,9 @@ def train(c):
             torch.nn.utils.clip_grad_norm_(net.parameters(), 1., error_if_nonfinite=not amp)
             scaler.step(opt)
             scaler.update()
-            print(f'epoch={epoch} frame={step}/{len(rows)} loss={terms["loss"].item():.6f}', flush=True)
+            if sys.stdout.isatty() or step == len(rows):
+                last_loss = terms['loss'].item()
+                show_progress(epoch, c['epochs'], step, len(rows), last_loss)
             if step == 1 or step % c['train_save_every'] == 0:
                 raw = (y if sample_online else restore(y, coords, hw)).cpu().numpy()
                 save_result(run/'train', f'epoch{epoch:03d}_iter{step:06d}', raw,
@@ -106,7 +154,7 @@ def train(c):
         path = run / 'checkpoints' / f'epoch_{epoch:03d}.pt'
         torch.save(dict(model=net.state_dict(), config=c, rule=sampling_rule(c), epoch=epoch), path)
         result = evaluate(net, c, pairs, run/'test'/f'epoch{epoch:03d}', device, epoch)
-        print(f'test MAE={result["mae_m"]} accuracy_3pct={result["accuracy_3pct"]}', flush=True)
+        show_progress(epoch, c['epochs'], len(rows), len(rows), last_loss, result)
         if c['real_each_epoch']:
             run_real(net, c, run/'real'/f'epoch{epoch:03d}', device)
     return run

@@ -36,9 +36,10 @@ def prepare(c):
     root.mkdir(parents=True, exist_ok=True)
     generation = Path(mkdtemp(prefix='frames-', dir=root))
     for i, (image, depth) in enumerate(pairs):
-        y, z, valid, meta = read_pair(image, depth, c, training=True)
+        audit = {}
+        y, z, valid, meta = read_pair(image, depth, c, training=True, audit=audit)
         if not valid.any():
-            raise ValueError(f'{depth}: frame has no supervised pixels')
+            raise ValueError(f'{depth}: frame has no supervised pixels: {audit}')
         coords = fixed_coords(y.shape, c['phase_mask_seed'], c['phase_grid_xy'])
         path = generation / f'frame_{i:06d}.npz'
         parts, depths, masks = (gather(a, coords) for a in (y, z, valid))
@@ -47,7 +48,7 @@ def prepare(c):
         previews(folder, i, y, z, valid, parts, depths, masks, c)
         manifest['train'].append(dict(file=str(path.relative_to(root)), source=str(image.resolve()),
                                       depth_source=str(depth.resolve()), **meta, preview=str((folder / "index.png").relative_to(root)),
-                                      sha256=digest(image)))
+                                      sha256=digest(image), depth_audit=audit))
         print(f'{image.name} -> {path.name} ({len(coords)} fixed masks)', flush=True)
     staged = generation / 'manifest.json'
     staged.write_text(json.dumps(manifest, indent=2), encoding='utf8')

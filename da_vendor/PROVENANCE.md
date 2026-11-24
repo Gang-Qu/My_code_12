@@ -26,3 +26,5 @@ My_code_12 keeps the My_code_10 attention implementation. The optional
 coord_tokens keyword now passes a zero-initialized external pixel-coordinate
 projection through dpt.py into the patch tokens in dinov2.py, before the
 transformer blocks. Official DA state_dict keys and tensor shapes are preserved.
+
+For relative checkpoints, dpt.py selects the upstream nonnegative ReLU output and omits the metric depth multiplier. The trainable conversion to metres is separate from the vendored DA network, in model.py.

@@ -107,12 +107,18 @@ def image_files(folder):
     return files
 
 
-def read_pair(image, depth, c, training=False):
+def read_pair(image, depth, c, training=False, audit=None):
     y, valid = measurement(image, c)
     source_hw = y.shape
     z = read_array(depth).astype(np.float32) * c['depth_scale']
+    if audit is not None:
+        from depth_audit import depth_counts
+        audit.update(source=str(depth), original=depth_counts(z, c['depth_min'], c['depth_max']))
     target = c['expected_hw'] if training or c.get('resize_before_inference_crop', False) else source_hw
     y, valid, z = resize_pair(y, valid, z, target)
     valid = valid & np.isfinite(z) & (z >= c['depth_min']) & (z <= c['depth_max']) & (z > 0)
     region, meta = center_region(source_hw, y.shape, c)
+    if audit is not None:
+        audit.update(crop=depth_counts(z[region], c['depth_min'], c['depth_max']),
+                     supervised_pixels=int(valid[region].sum()))
     return y[region], np.where(valid, z, 0)[region], valid[region], meta
