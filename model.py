@@ -85,7 +85,7 @@ class DepthModel(nn.Module):
         key = (tuple(hw), self.mask_seed, self.grid_xy)
         device = torch.device(device)
         if self._grid_key != key or self._base_grid.device != device:
-            self._base_grid = torch.from_numpy(fixed_coords(hw, self.mask_seed, self.grid_xy)).to(device)
+            self._base_grid = torch.from_numpy(fixed_coords(hw, self.mask_seed, self.grid_xy, persist=self.mask_mode == 'fixed')).to(device)
             self._grid_key = key
         return self._base_grid
 

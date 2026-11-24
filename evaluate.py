@@ -1,4 +1,5 @@
 """Each evaluation starts from paired full images in the raw test folders."""
+import csv
 import json
 import numpy as np
 from pathlib import Path
@@ -33,6 +34,12 @@ def evaluate(net, c, pairs, folder, device, epoch):
                   evaluation=dict(bin_width_m=.1, relative_error_limit=.03,
                                   rule='abs(pred-gt)/gt <= 0.03', config=c))
     (folder / 'metrics.json').write_text(json.dumps(result, indent=2, allow_nan=False))
+    fields = ['lower_m', 'upper_m', 'upper_inclusive', 'valid_pixels', 'pixel_fraction',
+              'within_3pct_pixels', 'accuracy_3pct']
+    with (folder / 'depth_bins.csv').open('w', encoding='utf-8', newline='') as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields, extrasaction='ignore')
+        writer.writeheader()
+        writer.writerows(result['depth_bins'])
     plot_test_bins(folder, result)
     return result
 

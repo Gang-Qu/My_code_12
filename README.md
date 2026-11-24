@@ -72,6 +72,12 @@ phase_grid_xy = [4, 2]
 
 ![同一示例帧的六张子图，每项左为测量、右为深度](examples/synthetic_grid_3x2/prepared/frames-7vkd0bqg/frame_000000/index.png)
 
+### fixed 掩码 NPZ 的自动恢复
+
+`fixed` 模式首次使用布局时，会从仓库的 `masks/` 读取对应表，并检查数组尺寸、整数类型以及每个单元内所有位置是否恰好出现一次。文件缺失、截断、缺少 `offsets` 或排列不完整时，会用当前种子重新随机生成互补掩码，先写临时 NPZ，再原子替换目标文件。下次启动直接读取已保存的表。相同配置恢复出的布局与原生成算法一致，可以继续使用原模型权重。[读取与恢复实现](sampling.py)
+
+默认横 4 纵 2、种子 41 沿用 `masks/fixed_seed41_v1.npz`；其他横纵布局按网格、种子和单元行列数分别保存。训练、测试和实拍共用这套规则。自动恢复的对象是采样掩码；带测量和真值的训练样本 NPZ 仍由原始配对数据生成。
+
 ## 两个独立模型开关
 
 | `use_coordinate_prior` | `use_refiner` | 运行路径 |
@@ -86,5 +92,14 @@ phase_grid_xy = [4, 2]
 ## 结果与验证范围
 
 训练预览保存回填后的整图。测试和实拍导出 PNG、米制 TIFF 及 NPZ。每轮测试目录有 `metrics.json` 和 `depth_bins.png`。按真值每 0.1 m 分箱，报告每箱有效像素比例和箱内 `abs(pred−gt)/gt ≤ 0.03` 的比例，总体指标按有效像素汇总。实验对照可固定数据、权重和种子，分别训练上表四种配置。
+
+每轮测试的 `test/epochNNN/depth_bins.csv` 与独立测试的 `output/evaluation/depth_bins.csv` 各深度箱一行，和同目录 `metrics.json` 的 `depth_bins`、`depth_bins.png` 共用整套测试图的汇总结果。默认 0.5–5.0 m 共 45 箱，左闭右开，最后一箱含上界。
+
+| 字段 | 计算方式 |
+|---|---|
+| `valid_pixels`、`pixel_fraction` | 箱内有效真值像素数，以及该数除以全测试集有效像素总数 |
+| `within_3pct_pixels`、`accuracy_3pct` | 箱内满足 `abs(pred−gt)/gt ≤ 0.03` 的像素数，以及该数除以箱内有效像素数 |
+
+CSV 和 JSON 中比例取 0–1，折线图显示百分数。空箱的命中数为 0，准确率在 CSV 留空、JSON 为 null。例如 1 m 处允许误差为 3 cm，2 m 处为 6 cm。
 
 运行 `python -m unittest discover` 可检验掩码覆盖、坐标回填和反传、开关的初始化等价性，并用临时图像完成一轮 ViT-S 训练、中心裁剪测试和实拍回放。集成测试使用随机初始化的同构 DA 权重文件。当前工作区未提供此次更换的原始配对数据和官方权重，因此已用合成帧验证固定布局的在线与缓存输出一致、可学习参数能收到梯度并改变取点、重新加载权重后坐标与测试深度可复现。实际精度收益仍需用目标数据衡量。

@@ -1,3 +1,4 @@
+import csv
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -82,6 +83,12 @@ class PipelineTest(unittest.TestCase):
                 np.testing.assert_allclose(reconstruct(net, result['measurement'], config, 'cpu'),
                                            result['depth_m'], rtol=1e-5)
             self.assertEqual(json.loads((test_dir/'metrics.json').read_text())['valid_pixels'], 51*73)
+            with (test_dir/'depth_bins.csv').open() as stream:
+                bins = list(csv.DictReader(stream))
+            self.assertEqual(len(bins), 45)
+            self.assertEqual(sum(int(r['valid_pixels']) for r in bins), 51*73)
+            self.assertAlmostEqual(sum(float(r['pixel_fraction']) for r in bins), 1.)
+            self.assertTrue(all(r['accuracy_3pct'] == '' for r in bins if r['valid_pixels'] == '0'))
             self.assertTrue((test_dir/'depth_bins.png').is_file())
             run_real(net, config, root/'real_again', 'cpu')
             actual = tifffile.imread(root/'real_again/0000_real_depth_m.tiff')

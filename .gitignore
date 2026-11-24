@@ -5,3 +5,5 @@ weights/
 output/
 *.pth
 *.pt
+/masks/fixed_*.npz
+!/masks/fixed_seed41_v1.npz

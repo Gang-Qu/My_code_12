@@ -1,6 +1,9 @@
 """Fixed complementary masks on a zero-based full image grid."""
 from functools import lru_cache
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+from zipfile import BadZipFile
+from zlib import error as ZlibError
 
 import numpy as np
 import torch
@@ -9,18 +12,56 @@ LEGACY_RULE = 'fixed-2x4-pcg64-518-v1'
 RULE = 'fixed-xy-pcg64-v2'
 
 
+MASK_DIR = Path(__file__).resolve().parent / 'masks'
+
+
+def _generate_offsets(seed, a, b, nh, nw):
+    if (a, b) == (4, 2):
+        ranks = np.random.PCG64(seed).random_raw((8, nh, nw))
+        return np.argsort(ranks, axis=0, kind='stable').astype(np.uint8)
+    offsets = np.empty((a*b, nh, nw), dtype=np.int32)
+    for row in range(nh):
+        rng = np.random.PCG64([seed, a, b, row])
+        offsets[:, row] = np.argsort(rng.random_raw((nw, a*b)), axis=1, kind='stable').T
+    return offsets
+
+
 @lru_cache(maxsize=2)
-def phase_offsets(seed):
-    # Same random permutation as the original fixed layout on a 1036 x 2072 frame.
-    if seed == 41:
-        path = Path(__file__).parent / 'masks' / 'fixed_seed41_v1.npz'
-        with np.load(path) as masks:
-            return masks['offsets']
-    ranks = np.random.PCG64(seed).random_raw((8, 518, 518))
-    return np.argsort(ranks, axis=0, kind='stable').astype(np.uint8)
+def cached_offsets(seed, a, b, nh, nw, directory):
+    """Persist the existing seed/grid algorithm; concurrent writers produce identical masks."""
+    name = (f'fixed_seed{seed}_v1.npz' if (a,b) == (4,2) else
+            f'fixed_{a}x{b}_seed{seed}_{nh}x{nw}_v2.npz')
+    path = Path(directory) / name
+    try:
+        with np.load(path, allow_pickle=False) as archive:
+            offsets = archive['offsets']
+        if (not isinstance(offsets, np.ndarray) or offsets.shape != (a*b, nh, nw)
+                or offsets.dtype.kind not in 'iu'):
+            raise ValueError('wrong mask shape or dtype')
+        if not np.all(np.sort(offsets, axis=0) == np.arange(a*b)[:, None, None]):
+            raise ValueError('each grid cell must be a permutation')
+        return offsets
+    except (OSError, ValueError, EOFError, TypeError, BadZipFile, KeyError, ZlibError, RuntimeError) as exc:
+        print(f'Fixed mask unavailable ({type(exc).__name__}); regenerating {path}', flush=True)
+
+    offsets = _generate_offsets(seed, a, b, nh, nw)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(dir=path.parent, delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        with tmp_path.open('wb') as stream:
+            np.savez_compressed(stream, offsets=offsets)
+        tmp_path.replace(path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    return offsets
 
 
-def fixed_coords(hw, seed, grid_xy=(4, 2)):
+def phase_offsets(seed, mask_dir=None):
+    return cached_offsets(seed, 4, 2, 518, 518, mask_dir or MASK_DIR)
+
+
+def fixed_coords(hw, seed, grid_xy=(4, 2), *, mask_dir=None, persist=True):
     h, w = hw
     if h < 1 or w < 1:
         raise ValueError('Expected a nonempty frame')
@@ -30,13 +71,11 @@ def fixed_coords(hw, seed, grid_xy=(4, 2)):
     nh, nw = (h+b-1)//b, (w+a-1)//a
     rows, cols = np.ogrid[:nh, :nw]
     if (a, b) == (4, 2):
-        offsets = phase_offsets(seed)[:, rows % 518, cols % 518]
+        offsets = phase_offsets(seed, mask_dir)[:, rows % 518, cols % 518]
+    elif persist:
+        offsets = cached_offsets(seed, a, b, nh, nw, mask_dir or MASK_DIR)
     else:
-        offsets = np.empty((a*b, nh, nw), dtype=np.int32)
-        for row in range(nh):
-            rng = np.random.PCG64([seed, a, b, row])
-            ranks = rng.random_raw((nw, a*b))
-            offsets[:, row] = np.argsort(ranks, axis=1, kind='stable').T
+        offsets = _generate_offsets(seed, a, b, nh, nw)
     ys = b * rows + offsets // a
     xs = a * cols + offsets % a
     coords = np.stack((ys, xs), axis=-1).astype(np.int32)

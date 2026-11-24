@@ -55,7 +55,7 @@ def scores(s):
     names = ['mae_m', 'abs_rel', 'rmse_m', 'delta1', 'delta2', 'delta3', 'accuracy_3pct']
     values = dict.fromkeys(names, None) if not n else dict(zip(
         names, [s[1]/n, s[2]/n, (s[3]/n)**.5, *list(s[4:]/n)]))
-    return dict(valid_pixels=int(n), **values)
+    return dict(valid_pixels=int(n), within_3pct_pixels=int(s[7]), **values)
 
 
 def loss_terms(pred, gt, valid, c):
