@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 import unittest
 
 import numpy as np
@@ -17,7 +18,7 @@ from train import train
 
 class DepthFilterTests(unittest.TestCase):
     def fixture(self, root):
-        c = dict(SETTINGS, prepared_dir=str(root/'prep'), output=str(root/'out'),
+        c = dict(SETTINGS, dataset_audit=True, prepared_dir=str(root/'prep'), output=str(root/'out'),
                  da_weights=str(root/'da.pt'), expected_hw=None, center_crop_hw=None,
                  device='cpu', epochs=1, freeze_da=True, use_refiner=True,
                  save_sampling_preview=False)
@@ -57,6 +58,41 @@ class DepthFilterTests(unittest.TestCase):
                 self.assertEqual(metrics['valid_pixels'], 3)
                 self.assertEqual([r['source'] for r in metrics['per_image']], ['mixed.png'])
                 self.assertEqual(len(metrics['skipped_frames']), 1)
+
+    def test_audit_off_still_filters_raw_and_prepared(self):
+        torch.set_num_threads(2)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            c = dict(self.fixture(root), dataset_audit=False, epochs=2, test_export_every=2)
+            torch.save(DepthModel(c, load_pretrained=False).da.state_dict(), c['da_weights'])
+            with patch('depth_audit.depth_counts', side_effect=AssertionError('audit was enabled')):
+                for mode in ('raw', 'prepared'):
+                    c['training_input'] = mode
+                    if mode == 'prepared':
+                        manifest = prepare(c)
+                        self.assertEqual(len(manifest['train']), 1)
+                        self.assertFalse(list((root/'prep').rglob('depth_range_audit.json')))
+                    run = train(c)
+                    self.assertFalse((run/'depth_range_audit.json').exists())
+                    for epoch in (1, 2):
+                        stats = json.loads((run/f'test/epoch{epoch:03d}/metrics.json').read_text())
+                        directory = run/f'test/epoch{epoch:03d}'
+                        self.assertTrue((directory/'depth_bins.png').is_file())
+                        self.assertEqual(bool(list(directory.glob('*_depth_m.tiff'))), epoch == 2)
+                        self.assertEqual(stats['valid_pixels'], 3)
+                        self.assertEqual(len(stats['skipped_frames']), 1)
+
+    def test_duplicate_valid_measurement_detected_with_audit_off(self):
+        with TemporaryDirectory() as tmp:
+            c = dict(self.fixture(Path(tmp)), dataset_audit=False)
+            original = Path(c['train_y'])/'mixed.png'
+            (Path(c['val_y'])/'mixed.png').write_bytes(original.read_bytes())
+            for mode in ('raw', 'prepared'):
+                c['training_input'] = mode
+                if mode == 'prepared':
+                    prepare(c)
+                with self.assertRaisesRegex(ValueError, 'Duplicate measurement'):
+                    train(c)
 
     def test_standalone_empty_validation_exports_unavailable_metrics(self):
         with TemporaryDirectory() as tmp:

@@ -59,6 +59,7 @@ class DepthModel(nn.Module):
         self.checkpoint_activations = c.get('checkpoint_da_activations', False)
         self.grid_xy = tuple(c.get('phase_grid_xy', (4, 2)))
         self.register_buffer('_base_grid', None, persistent=False)
+        self.register_buffer('_base_linear', None, persistent=False)
         self._grid_key = None
         self.mask_seed = c['phase_mask_seed']
         if type(self.mask_seed) is not int or self.mask_seed < 0:
@@ -105,6 +106,10 @@ class DepthModel(nn.Module):
         device = torch.device(device)
         if self._grid_key != key or self._base_grid.device != device:
             self._base_grid = torch.from_numpy(fixed_coords(hw, self.mask_seed, self.grid_xy, persist=self.mask_mode == 'fixed')).to(device)
+            self._base_linear = None
+            if self._base_grid[..., 0].numel() == hw[0] * hw[1]:
+                y, x = self._base_grid.unbind(-1)
+                self._base_linear = (y.long() * hw[1] + x).reshape(-1)
             self._grid_key = key
         return self._base_grid
 
@@ -115,19 +120,29 @@ class DepthModel(nn.Module):
     def forward_frame(self, frame, chunk=1, return_coords=False):
         hw = frame.shape
         base = self._base_coords(hw, frame.device)
-        coords = self.mask.route(base) if self.mask is not None else base
         # Training differentiates both the split and its inverse. Deployment needs
         # only the final integer coordinates: a single gather and inverse scatter.
         train_mask = self.mask is not None and self.training and torch.is_grad_enabled()
+        need_routed_coords = not train_mask or return_coords or self.coord_embed is not None
+        coords = self.mask.route(base) if self.mask is not None and need_routed_coords else base
         scatter_coords = base if train_mask else coords
-        rows, cols = scatter_coords.unbind(-1)
-        parts = frame[rows.clamp_min(0).long(), cols.clamp_min(0).long()].masked_fill(rows < 0, 0)
+        linear = self._base_linear if scatter_coords is base else None
+        if linear is None:
+            rows, cols = scatter_coords.unbind(-1)
+            parts = frame[rows.clamp_min(0).long(), cols.clamp_min(0).long()].masked_fill(rows < 0, 0)
+        else:
+            parts = frame.reshape(-1).index_select(0, linear).reshape(base.shape[:-1])
         if train_mask:
             parts = self.mask.route(parts)
         preds = self._predict_all_parts(parts, coords, hw, chunk)
         if train_mask:
             preds = self.mask.route(preds, inverse=True)
-        final = self._refine(restore(preds, scatter_coords, hw), frame)
+        if linear is None:
+            coarse = restore(preds, scatter_coords, hw)
+        else:
+            # This permutation covers every destination exactly once.
+            coarse = preds.new_empty(linear.numel()).scatter_(0, linear, preds.reshape(-1)).reshape(hw)
+        final = self._refine(coarse, frame)
         return (final, coords) if return_coords else final
 
     def forward(self, parts, coords, hw, chunk=1):

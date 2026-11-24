@@ -42,7 +42,7 @@ def optimizer_for(net, c):
 def training_records(c):
     source = c.get('training_input', 'prepared')
     if source == 'raw':
-        return [dict(image=image, depth=depth, sha256=digest(image))
+        return [dict(image=image, depth=depth)
                 for image, depth in paired_files(c['train_y'], c['train_depth'])], []
     if source != 'prepared':
         raise ValueError("training_input must be 'raw' or 'prepared'")
@@ -72,6 +72,44 @@ def audit_training_rows(rows, c, raw):
     return result
 
 
+def check_split_overlap(rows, pairs, c, raw, prefiltered):
+    # Identical file contents must have equal lengths. Decode labels only when
+    # a byte-for-byte match could involve a frame excluded from supervision.
+    sizes = {image.stat().st_size for image, _ in pairs}
+    matches = {}
+    candidate_sizes = set() if raw else sizes
+    for row in rows:
+        if raw:
+            size = row['image'].stat().st_size
+            if size not in sizes:
+                continue
+            candidate_sizes.add(size)
+            key = digest(row['image'])
+        else:
+            key = row['sha256']
+        matches.setdefault(key, []).append(row)
+    if not matches:
+        return
+    for image, depth in pairs:
+        if image.stat().st_size not in candidate_sizes:
+            continue
+        group = matches.get(digest(image))
+        if not group:
+            continue
+        if prefiltered:
+            raise ValueError('Duplicate measurement across train/test')
+        if not read_pair(image, depth, c)[2].any():
+            continue
+        for row in group:
+            if raw:
+                valid = read_pair(row['image'], row['depth'], c, training=True)[2]
+            else:
+                with np.load(Path(c['prepared_dir']) / row['file']) as frame:
+                    valid = frame['valid']
+            if valid.any():
+                raise ValueError('Duplicate measurement across train/test')
+
+
 def show_progress(epoch, epochs, step, steps, loss, metrics=None):
     tty = sys.stdout.isatty()
     if not tty and metrics is None:
@@ -93,23 +131,28 @@ def show_progress(epoch, epochs, step, steps, loss, metrics=None):
 
 
 def train(c):
+    export_every = c.get('test_export_every', 1)
+    if type(export_every) is not int or export_every < 1:
+        raise ValueError('test_export_every must be a positive integer')
     rows, skipped_at_prepare = training_records(c)
     raw_input = c.get('training_input', 'prepared') == 'raw'
     sample_online = raw_input or c['phase_mask_mode'] == 'learned'
     pairs = paired_files(c['val_y'], c['val_depth'])
     run = Path(c['output']) / datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     (run / 'checkpoints').mkdir(parents=True)
-    train_audit = audit_training_rows(rows, c, raw_input)
-    val_audit = [audit_pair(y, z, c, training=False) for y, z in pairs]
-    report = write_audit(run, c, dict(train=train_audit + skipped_at_prepare, val=val_audit))
-    rows = [row for row, info in zip(rows, train_audit) if info['supervised_pixels'] > 0]
-    pairs = [pair for pair, info in zip(pairs, val_audit) if info['supervised_pixels'] > 0]
+    audit_enabled = c.get('dataset_audit', True)
+    skipped_val = []
+    if audit_enabled:
+        train_audit = audit_training_rows(rows, c, raw_input)
+        val_audit = [audit_pair(y, z, c, training=False) for y, z in pairs]
+        report = write_audit(run, c, dict(train=train_audit + skipped_at_prepare, val=val_audit))
+        rows = [row for row, info in zip(rows, train_audit) if info['supervised_pixels'] > 0]
+        pairs = [pair for pair, info in zip(pairs, val_audit) if info['supervised_pixels'] > 0]
+        skipped_val = report['splits']['val']['zero_supervision_frames']
+    no_supervision = '整个训练集在裁剪和有效深度筛选后没有监督点。请核对单位、深度范围及裁剪，或运行 python depth_audit.py'
     if not rows:
-        raise ValueError(f"整个训练集在裁剪和有效深度筛选后没有监督点。请核对 depth_scale、"
-                         f"depth_min、depth_max 和裁剪区域。详见 {run / 'depth_range_audit.json'}")
-    hashes = {row['sha256'] for row in rows}
-    if any(digest(image) in hashes for image, _ in pairs):
-        raise ValueError('Duplicate measurement across train/test')
+        raise ValueError(no_supervision)
+    check_split_overlap(rows, pairs, c, raw_input, audit_enabled)
     torch.manual_seed(c['seed'])
     device = torch.device(c['device'])
     net = DepthModel(c).to(device)
@@ -121,20 +164,31 @@ def train(c):
             net.da.eval()
         elif c['freeze_encoder']:
             net.da.pretrained.eval()
-        for step, idx in enumerate(torch.randperm(len(rows)).tolist(), 1):
+        empty_indices = set()
+        step = 0
+        for idx in torch.randperm(len(rows)).tolist():
             row = rows[idx]
             if raw_input:
                 y, gt, valid, meta = read_pair(row['image'], row['depth'], c, training=True)
+                if not audit_enabled and epoch == 1 and not valid.any():
+                    empty_indices.add(idx)
+                    continue
                 y, gt, valid = (torch.from_numpy(a).to(device) for a in (y, gt, valid))
             else:
                 hw = tuple(row['hw'])
                 with np.load(Path(c['prepared_dir']) / row['file']) as frame:
-                    y, gt, valid, coords = (torch.from_numpy(frame[k]).to(device)
-                                            for k in ('y', 'depth', 'valid', 'coords_yx'))
+                    mask = frame['valid']
+                    if not audit_enabled and epoch == 1 and not mask.any():
+                        empty_indices.add(idx)
+                        continue
+                    valid = torch.from_numpy(mask).to(device)
+                    y, gt, coords = (torch.from_numpy(frame[k]).to(device)
+                                     for k in ('y', 'depth', 'coords_yx'))
                 if sample_online:
                     y = restore(y, coords, hw)
                 gt = restore(gt, coords, hw)
                 valid = restore(valid, coords, hw)
+            step += 1
             opt.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, dtype=dtype, enabled=amp):
                 if sample_online:
@@ -147,18 +201,32 @@ def train(c):
             torch.nn.utils.clip_grad_norm_(net.parameters(), 1., error_if_nonfinite=not amp)
             scaler.step(opt)
             scaler.update()
-            if sys.stdout.isatty() or step == len(rows):
-                last_loss = terms['loss'].item()
-                show_progress(epoch, c['epochs'], step, len(rows), last_loss)
+            last_loss = terms['loss'].detach()
+            if sys.stdout.isatty():
+                show_progress(epoch, c['epochs'], step, len(rows)-len(empty_indices), last_loss.item())
             if step == 1 or step % c['train_save_every'] == 0:
                 raw = (y if sample_online else restore(y, coords, hw)).cpu().numpy()
                 save_result(run/'train', f'epoch{epoch:03d}_iter{step:06d}', raw,
                             pred.detach().cpu().numpy(), geometry(raw, c, meta if raw_input else None), c, gt.cpu().numpy(), save_arrays=False)
+        if not audit_enabled and epoch == 1 and (empty_indices or skipped_at_prepare):
+            skipped = [r['source'] for r in skipped_at_prepare]
+            for i in sorted(empty_indices):
+                row = rows[i]
+                skipped.append(str(row['depth'] if raw_input else row.get('depth_source', row['file'])))
+            (run / 'skipped_train.json').write_text(json.dumps(skipped, indent=2), encoding='utf8')
+        if empty_indices:
+            rows = [row for i, row in enumerate(rows) if i not in empty_indices]
+        if not rows:
+            raise ValueError(no_supervision)
         path = run / 'checkpoints' / f'epoch_{epoch:03d}.pt'
         torch.save(dict(model=net.state_dict(), config=c, rule=sampling_rule(c), epoch=epoch), path)
         result = evaluate(net, c, pairs, run/'test'/f'epoch{epoch:03d}', device, epoch,
-                          skipped_frames=report['splits']['val']['zero_supervision_frames'])
-        show_progress(epoch, c['epochs'], len(rows), len(rows), last_loss, result)
+                          skipped_frames=skipped_val, export_images=epoch == c['epochs'] or epoch % export_every == 0)
+        if not audit_enabled and epoch == 1:
+            skipped_val = result['skipped_frames']
+            excluded = set(skipped_val)
+            pairs = [pair for pair in pairs if str(pair[1]) not in excluded]
+        show_progress(epoch, c['epochs'], len(rows), len(rows), last_loss.item(), result)
         if c['real_each_epoch']:
             run_real(net, c, run/'real'/f'epoch{epoch:03d}', device)
     return run

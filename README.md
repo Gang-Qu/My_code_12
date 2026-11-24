@@ -17,13 +17,24 @@
 
 ## 训练前审查数据集深度范围
 
-填写数据路径后可单独运行 `python depth_audit.py`，在 `output/depth_range_audit.json` 查看结果。正常训练也会在加载 DA、开始优化前审查 train 和 val 一次，将报告放在本次运行目录。报告同时记录单位换算 `depth_scale`、有效闭区间、逐帧明细和各集合汇总。
+填写数据路径后可单独运行 `python depth_audit.py`，在 `output/depth_range_audit.json` 查看结果。在 `settings.py` 设置 `dataset_audit=True`，训练会在加载 DA 前审查 train 和 val 一次，将报告放在本次运行目录。默认 `False`，训练和预处理都跳过完整范围统计与报告生成。原图训练在第一轮读到每帧时按相同有效掩码筛选，后续轮次跳过已识别的空帧；存在跳过的训练帧时，路径记在 `skipped_train.json`。直接运行独立审查脚本始终执行完整审查。报告同时记录单位换算 `depth_scale`、有效闭区间、逐帧明细和各集合汇总。
 
 - `original` 统计原始深度 TIFF 换算为米、尚未 resize 或过滤的数值。`crop` 统计实际裁剪区域、应用有效性过滤前的数值。两处均报告正有限深度最小值、最大值，以及非有限、非正、低于下界、范围内、高于上界五类像素数。
 - 终端的 `Depth audit train` 是训练集统计。`below`、`above` 分别是裁剪区域内低于下限、高于上限的正有限深度像素数；零、负数和非有限值在 JSON 中单列。`supervised` 是实际参与损失的像素数，要求米制深度在闭区间内且对应测量有效。`kept_frames=3/4` 表示 4 帧中保留了 3 帧。
 - 直接运行 `python train.py` 即会筛选。默认范围 0.5–5 m 时，一张图里的 0.5、2、5 m 可以参加损失，0.1、10 m 和 NaN 被屏蔽。整帧监督点为零就跳过，下一张有效图继续训练。只有整个训练集都没有监督点时才会因深度筛选停止；此时根据报告核对 `depth_scale`、范围和裁剪区域。筛选只决定训练和评价用哪些数据，原始图像文件保持原样。
 - `retained_frames` 和 `zero_supervision_frames` 分别记录保留帧数和无监督帧清单。预生成缓存时只为保留帧写 NPZ；从已有缓存训练也会筛选。旧缓存仅能核实有效点数，过滤前的深度范围可在原始 TIFF 上单独审查。测试同样跳过无有效真值的帧，写入 `metrics.json` 的 `skipped_frames`；若整套测试都没有有效真值，准确率为 null。无标签实拍继续按原输入重建。
 - 交互终端在同一行刷新，左侧显示当前帧的 `loss`，右侧显示 epoch、帧计数和本轮百分比，轮末补充测试 MAE 和 3% 命中率。输出重定向到日志时每轮保留一条汇总。
+
+### 如何缩短训练时间
+
+| 慢在哪一段 | 可直接尝试的设置和取舍 |
+|---|---|
+| 从启动到第一步很久 | 已确认数据单位和范围时使用默认 `dataset_audit=False`。这样省掉全量审查读图和统计；训练仍过滤越界像素，并检查有效训练/测试图是否重复。 |
+| 训练结束一轮后，等待下一轮很久 | 先试 `test_export_every=5`。每 5 轮及最后一轮保存测试整图 TIFF、PNG、压缩 NPZ 和配置的掩码预览。所有轮次仍做完整测试推理，保存分箱 CSV、JSON、折线图及模型 checkpoint。独立运行 `evaluate.py` 仍会导出整图。默认 1 保留每轮图像。 |
+| GPU 有显存余量，DA 前向占主要时间 | 同一裁剪、权重和种子下，把训练 `batch_size` 从 2 试到 4，或将 `inference_batch_size` 从 1 试到 2。以 8 张子图为例，训练 DA 调用从 4 次变成 2 次，仍是每幅图更新一次参数。对比每帧耗时和峰值显存；显存紧张时保留原设置。CUDA 默认启用 AMP 和 SDPA。 |
+| 每轮重复解码原图、resize 很慢 | 固定数据与裁剪时，可运行一次 `prepare_dataset.py` 并试 `training_input='prepared'`。固定模式可直接读取已分组数据；可学习模式仍会还原整图并在线采样。NPZ 还存坐标，网络盘读取较慢时应实测 raw 和 prepared 的用时。 |
+
+针对默认 1036×2072、横 4 纵 2 的在线固定采样，模型现在复用同尺寸的线性像素索引进行取点、回填。可学习掩码训练在关闭坐标先验且无需导出坐标时，省去一次整数坐标交换。用本机 CPU 双线程对固定采样的取点和回填做交替计时，预热后 10 次中位数由 30.18 ms 降至 2.55 ms，输出逐像素一致。该测量只含索引操作；尚无目标 GPU、真实训练数据的整轮耗时。比较整轮速度时，请同时记录训练迭代耗时和轮末评估/写盘耗时。
 
 ### 超量程深度可以显示为最远距离吗？
 
@@ -69,7 +80,7 @@ lr_mask=1e-3,
 
 **梯度与验证。** 训练使用直通估计器，用 sigmoid 的导数近似二元选择的梯度；测量分组和深度逆回填两处都参与反传。GT 和有效性掩码留在中心裁剪的原坐标系，位置先验使用本次实际选中的整数坐标。可设置 `freeze_da=True` 并关闭坐标先验、整合器，单独检验学习采样的贡献（N>1）。这仍是对已完整读入的测量做软件分组。要判断收益，用相同数据、DA 初始化及更新预算比较 `fixed` 与 `learned` 的测试 MAE 和 3% 命中率。
 
-**测试和实拍。** 将 `reconstruct_real.py` 中的 `CHECKPOINT` 指向本轮保存的权重，带真值测试运行 `python evaluate.py`，实拍运行 `python reconstruct_real.py`。checkpoint 包含掩码参数、网格、种子、规则版本和 DA 权重。推理从中恢复确定的整数坐标，对裁剪大图采样，逐子图预测米制深度，再按相同坐标回填。`save_sampling_preview=True` 会在每轮首幅测试图的 `sampling_N_parts/` 下保存编号子图、整组预览和实际使用的 `coords_yx.npy`，可与重载 checkpoint 后生成的坐标逐点核对。[采样实现](sampling.py) · [训练入口](train.py) · [权重回放测试](test_learned_mask.py)
+**测试和实拍。** 将 `reconstruct_real.py` 中的 `CHECKPOINT` 指向本轮保存的权重，带真值测试运行 `python evaluate.py`，实拍运行 `python reconstruct_real.py`。checkpoint 包含掩码参数、网格、种子、规则版本和 DA 权重。推理从中恢复确定的整数坐标，对裁剪大图采样，逐子图预测米制深度，再按相同坐标回填。`save_sampling_preview=True` 会在导出整图的轮次中首幅测试图的 `sampling_N_parts/` 下保存编号子图、整组预览和实际使用的 `coords_yx.npy`，可与重载 checkpoint 后生成的坐标逐点核对。[采样实现](sampling.py) · [训练入口](train.py) · [权重回放测试](test_learned_mask.py)
 
 ## 准备训练数据并运行
 

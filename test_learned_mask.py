@@ -54,6 +54,20 @@ class LearnableRoutingTest(unittest.TestCase):
             online = net.forward_frame(torch.from_numpy(array))
         torch.testing.assert_close(online, cached, rtol=0, atol=0)
 
+    def test_dense_online_index_preserves_input_gradient(self):
+        torch.set_num_threads(2)
+        hw = (42, 84)
+        c = dict(SETTINGS, freeze_da=True)
+        net = DepthModel(c, load_pretrained=False).eval()
+        x = torch.rand(hw, requires_grad=True)
+        coords = net.sampling_coords(hw, 'cpu')
+        rows, cols = coords.unbind(-1)
+        cached = net(x[rows.long(), cols.long()], coords, hw, 2)
+        online = net.forward_frame(x, 2)
+        torch.testing.assert_close(cached, online, rtol=0, atol=0)
+        torch.testing.assert_close(torch.autograd.grad(cached.sum(), x)[0],
+                                   torch.autograd.grad(online.sum(), x)[0], rtol=0, atol=0)
+
     def test_training_without_prepared_files_and_checkpoint_replay(self):
         torch.set_num_threads(2)
         with tempfile.TemporaryDirectory() as tmp:

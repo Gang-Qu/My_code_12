@@ -13,6 +13,7 @@ SETTINGS = dict(
     save_sampling_preview=True,  # first raw test frame of each epoch
 
     black_level=0., white_level=None, gain=1., input_encoding='linear',
+    dataset_audit=False,  # True generates the full pre-training depth-range report
     depth_scale=1., depth_min=.5, depth_max=5.,
     da_model_type='metric',  # 'metric' or 'relative'
     relative_da_weights='weights/depth_anything_v2_vits.pth', lr_calibration=1e-3,
@@ -24,5 +25,6 @@ SETTINGS = dict(
     lr_encoder=1e-6, lr_decoder=5e-6, lr_extra=1e-5, seed=41,
     checkpoint_da_activations=False,  # recompute DA microbatches on backward to reduce peak memory
     amp=True, amp_dtype='float16', depth_l1_weight=1., depth_edge_weight=.1,
+    test_export_every=1,  # full-resolution test files every N epochs and the final epoch
     real_each_epoch=False, train_save_every=200,
 )

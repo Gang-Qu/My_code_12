@@ -13,7 +13,7 @@ from prep_preview import previews
 from sampling import gather
 
 
-def evaluate(net, c, pairs, folder, device, epoch, skipped_frames=()):
+def evaluate(net, c, pairs, folder, device, epoch, skipped_frames=(), export_images=True):
     net.eval()
     stats = EpochStats(c)
     rows = []
@@ -24,7 +24,7 @@ def evaluate(net, c, pairs, folder, device, epoch, skipped_frames=()):
         if not valid.any():
             skipped.append(str(label))
             continue
-        show_mask = not rows and c.get('save_sampling_preview', False)
+        show_mask = export_images and not rows and c.get('save_sampling_preview', False)
         if show_mask:
             pred, coords = reconstruct(net, y, c, device, return_coords=True)
             folder.mkdir(parents=True, exist_ok=True)
@@ -34,7 +34,8 @@ def evaluate(net, c, pairs, folder, device, epoch, skipped_frames=()):
         else:
             pred = reconstruct(net, y, c, device)
         rows.append(dict(source=image.name, **stats.update(pred[None], gt[None], valid[None])))
-        save_result(folder, f'{i:04d}_{image.stem}', y, pred, geometry(y, c, meta), c, gt)
+        if export_images:
+            save_result(folder, f'{i:04d}_{image.stem}', y, pred, geometry(y, c, meta), c, gt)
     result = dict(**stats.result(), epoch=epoch, per_image=rows, skipped_frames=skipped,
                   evaluation=dict(bin_width_m=.1, relative_error_limit=.03,
                                   rule='abs(pred-gt)/gt <= 0.03', config=c))
