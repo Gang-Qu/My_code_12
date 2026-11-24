@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+data/
+weights/
+output/
+*.pth
+*.pt
