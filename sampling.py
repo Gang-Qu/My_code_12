@@ -5,7 +5,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-RULE = 'fixed-2x4-pcg64-518-v1'
+LEGACY_RULE = 'fixed-2x4-pcg64-518-v1'
+RULE = 'fixed-xy-pcg64-v2'
 
 
 @lru_cache(maxsize=2)
@@ -19,14 +20,25 @@ def phase_offsets(seed):
     return np.argsort(ranks, axis=0, kind='stable').astype(np.uint8)
 
 
-def fixed_coords(hw, seed):
+def fixed_coords(hw, seed, grid_xy=(4, 2)):
     h, w = hw
     if h < 1 or w < 1:
         raise ValueError('Expected a nonempty frame')
-    rows, cols = np.ogrid[:(h + 1)//2, :(w + 3)//4]
-    offsets = phase_offsets(seed)[:, rows % 518, cols % 518]
-    ys = 2 * rows + offsets // 4
-    xs = 4 * cols + offsets % 4
+    if len(grid_xy) != 2 or any(type(n) is not int or n < 1 for n in grid_xy):
+        raise ValueError('phase_grid_xy requires two positive integers [horizontal, vertical]')
+    a, b = grid_xy
+    nh, nw = (h+b-1)//b, (w+a-1)//a
+    rows, cols = np.ogrid[:nh, :nw]
+    if (a, b) == (4, 2):
+        offsets = phase_offsets(seed)[:, rows % 518, cols % 518]
+    else:
+        offsets = np.empty((a*b, nh, nw), dtype=np.int32)
+        for row in range(nh):
+            rng = np.random.PCG64([seed, a, b, row])
+            ranks = rng.random_raw((nw, a*b))
+            offsets[:, row] = np.argsort(ranks, axis=1, kind='stable').T
+    ys = b * rows + offsets // a
+    xs = a * cols + offsets % a
     coords = np.stack((ys, xs), axis=-1).astype(np.int32)
     coords[(ys >= h) | (xs >= w)] = -1
     return coords

@@ -12,6 +12,17 @@ class FixedSampling(unittest.TestCase):
         good = small[..., 0] >= 0
         np.testing.assert_equal(small[good], large[good])
 
+    def test_variable_partitions(self):
+        hw = (43, 53)
+        frame = np.arange(np.prod(hw)).reshape(hw)
+        for a, b in ((1, 1), (1, 5), (3, 1), (3, 2), (17, 16)):
+            coords = fixed_coords(hw, 41, [a, b])
+            self.assertEqual(coords.shape, (a*b, (43+b-1)//b, (53+a-1)//a, 2))
+            parts = gather(frame, coords)
+            self.assertEqual((coords[..., 0] >= 0).sum(), frame.size)
+            result = restore(torch.from_numpy(parts), torch.from_numpy(coords), hw)
+            np.testing.assert_array_equal(result.numpy(), frame)
+
     def test_coverage_and_inverse(self):
         for hw in [(1, 1), (33, 71), (56, 112)]:
             coords = fixed_coords(hw, 41)

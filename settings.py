@@ -2,7 +2,10 @@ SETTINGS = dict(
     train_y='data/train/measurement', train_depth='data/train/depth',
     val_y='data/val/measurement', val_depth='data/val/depth',
     real_dir='data/real', prepared_dir='data/prepared_12', output='output',
-    expected_hw=[1536, 2500],  # training only; None keeps the file grid
+    expected_hw=[1536, 2500],  # H,W; None keeps native resolution
+    center_crop_hw=[1036, 2072],  # H,W after resize; None keeps the full grid
+    resize_before_inference_crop=False,  # test/real: center crop native input by default
+    phase_grid_xy=[4, 2],  # horizontal, vertical; produces 4*2 subimages
     phase_mask_mode='fixed', phase_mask_seed=41,
     black_level=0., white_level=None, gain=1., input_encoding='linear',
     depth_scale=1., depth_min=.5, depth_max=5.,

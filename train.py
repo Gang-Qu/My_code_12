@@ -13,7 +13,7 @@ from model import DepthModel
 from outputs import save_result
 from prepare_dataset import digest, signature
 from reconstruct_real import geometry, run_real
-from sampling import RULE, restore
+from sampling import LEGACY_RULE, RULE, restore
 from settings import SETTINGS
 
 
@@ -33,7 +33,10 @@ def optimizer_for(net, c):
 def train(c):
     prep = Path(c['prepared_dir'])
     manifest = json.loads((prep / 'manifest.json').read_text())
-    if manifest['rule'] != RULE or manifest['preprocessing'] != signature(c):
+    saved = dict(manifest['preprocessing'])
+    if manifest['rule'] == LEGACY_RULE:
+        saved.update(phase_grid_xy=[4, 2], center_crop_hw=None)
+    if manifest['rule'] not in (LEGACY_RULE, RULE) or saved != signature(c):
         raise ValueError('Sampling or preprocessing changed. Run prepare_dataset.py again.')
     rows = manifest['train']
     pairs = paired_files(c['val_y'], c['val_depth'])
@@ -74,7 +77,7 @@ def train(c):
             if step == 1 or step % c['train_save_every'] == 0:
                 raw = restore(y, coords, hw).cpu().numpy()
                 save_result(run/'train', f'epoch{epoch:03d}_iter{step:06d}', raw,
-                            pred.detach().cpu().numpy(), geometry(raw), c, gt.cpu().numpy(), save_arrays=False)
+                            pred.detach().cpu().numpy(), geometry(raw, c), c, gt.cpu().numpy(), save_arrays=False)
         path = run / 'checkpoints' / f'epoch_{epoch:03d}.pt'
         torch.save(dict(model=net.state_dict(), config=c, rule=RULE, epoch=epoch), path)
         result = evaluate(net, c, pairs, run/'test'/f'epoch{epoch:03d}', device, epoch)

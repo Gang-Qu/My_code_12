@@ -1,0 +1,51 @@
+{
+  "rule": "fixed-xy-pcg64-v2",
+  "preprocessing": {
+    "phase_mask_mode": "fixed",
+    "phase_mask_seed": 41,
+    "phase_grid_xy": [
+      3,
+      2
+    ],
+    "center_crop_hw": [
+      81,
+      121
+    ],
+    "expected_hw": [
+      100,
+      160
+    ],
+    "depth_scale": 1.0,
+    "depth_min": 0.5,
+    "depth_max": 5.0,
+    "black_level": 0.0,
+    "white_level": null,
+    "gain": 1.0,
+    "input_encoding": "linear"
+  },
+  "train": [
+    {
+      "file": "frames-7vkd0bqg/frame_000000.npz",
+      "source": "examples/synthetic_grid_3x2/measurement/scene.png",
+      "depth_source": "examples/synthetic_grid_3x2/depth/scene.tif",
+      "source_hw": [
+        93,
+        131
+      ],
+      "resized_hw": [
+        100,
+        160
+      ],
+      "crop_origin_yx": [
+        9,
+        19
+      ],
+      "hw": [
+        81,
+        121
+      ],
+      "preview": "frames-7vkd0bqg/frame_000000/index.png",
+      "sha256": "7a19e0434d8c02d31b959d943fc57834af5a48f3f694c22d444a7a9c464216ef"
+    }
+  ]
+}

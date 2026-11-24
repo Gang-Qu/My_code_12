@@ -14,10 +14,10 @@ def evaluate(net, c, pairs, folder, device, epoch):
     stats = EpochStats(c)
     rows = []
     for i, (image, label) in enumerate(pairs):
-        y, gt, valid, _ = read_pair(image, label, c)
+        y, gt, valid, meta = read_pair(image, label, c)
         pred = reconstruct(net, y, c, device)
         rows.append(dict(source=image.name, **stats.update(pred[None], gt[None], valid[None])))
-        save_result(folder, f'{i:04d}_{image.stem}', y, pred, geometry(y), c, gt)
+        save_result(folder, f'{i:04d}_{image.stem}', y, pred, geometry(y, c, meta), c, gt)
     result = dict(**stats.result(), epoch=epoch, per_image=rows,
                   evaluation=dict(bin_width_m=.1, relative_error_limit=.03,
                                   rule='abs(pred-gt)/gt <= 0.03', config=c))

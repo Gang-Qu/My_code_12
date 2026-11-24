@@ -54,17 +54,38 @@ def resize_pair(y, measurement_valid, depth, expected_hw):
             raise ValueError(f'Measurement and depth shapes differ: {y.shape}, {depth.shape}')
         return y, measurement_valid, depth
 
+    y, measurement_valid = resize_measurement(y, measurement_valid, expected_hw)
+    height, width = expected_hw
+    size = (width, height)
+    if depth.shape != (height, width):
+        depth = np.asarray(Image.fromarray(depth).resize(size, Image.Resampling.NEAREST))
+    return y, measurement_valid, depth
+
+
+def resize_measurement(y, valid, expected_hw):
+    if expected_hw is None:
+        return y, valid
     height, width = expected_hw
     size = (width, height)
     if y.shape != (height, width):
         bilinear = Image.Resampling.BILINEAR
         y = np.asarray(Image.fromarray(y).resize(size, bilinear))
         # Conservatively exclude any measurement influenced by invalid source pixels.
-        invalid = (~measurement_valid).astype(np.float32)
-        measurement_valid = np.asarray(Image.fromarray(invalid).resize(size, bilinear)) == 0
-    if depth.shape != (height, width):
-        depth = np.asarray(Image.fromarray(depth).resize(size, Image.Resampling.NEAREST))
-    return y, measurement_valid, depth
+        invalid = (~valid).astype(np.float32)
+        valid = np.asarray(Image.fromarray(invalid).resize(size, bilinear)) == 0
+    return y, valid
+
+
+def center_region(source_hw, resized_hw, c):
+    h, w = resized_hw
+    target = c.get('center_crop_hw') or resized_hw
+    ch, cw = target
+    if not (0 < ch <= h and 0 < cw <= w):
+        raise ValueError(f'center_crop_hw={target} exceeds resized frame {resized_hw}')
+    r, col = (h-ch)//2, (w-cw)//2
+    region = np.s_[r:r+ch, col:col+cw]
+    return region, dict(source_hw=list(source_hw), resized_hw=list(resized_hw),
+                        crop_origin_yx=[r, col], hw=[ch,cw])
 
 
 def paired_files(image_dir, depth_dir):
@@ -90,7 +111,8 @@ def read_pair(image, depth, c, training=False):
     y, valid = measurement(image, c)
     source_hw = y.shape
     z = read_array(depth).astype(np.float32) * c['depth_scale']
-    target = c['expected_hw'] if training else source_hw
+    target = c['expected_hw'] if training or c.get('resize_before_inference_crop', False) else source_hw
     y, valid, z = resize_pair(y, valid, z, target)
     valid = valid & np.isfinite(z) & (z >= c['depth_min']) & (z <= c['depth_max']) & (z > 0)
-    return y, np.where(valid, z, 0), valid, source_hw
+    region, meta = center_region(source_hw, y.shape, c)
+    return y[region], np.where(valid, z, 0)[region], valid[region], meta

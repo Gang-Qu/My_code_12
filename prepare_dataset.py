@@ -9,8 +9,9 @@ import numpy as np
 from data import paired_files, read_pair
 from sampling import RULE, fixed_coords, gather
 from settings import SETTINGS
+from prep_preview import previews
 
-PREP_KEYS = ('phase_mask_mode', 'phase_mask_seed', 'expected_hw', 'depth_scale',
+PREP_KEYS = ('phase_mask_mode', 'phase_mask_seed', 'phase_grid_xy', 'center_crop_hw', 'expected_hw', 'depth_scale',
              'depth_min', 'depth_max', 'black_level', 'white_level', 'gain', 'input_encoding')
 
 
@@ -30,21 +31,23 @@ def digest(path):
 def prepare(c):
     manifest = dict(rule=RULE, preprocessing=signature(c), train=[])
     pairs = paired_files(c['train_y'], c['train_depth'])
-    root = Path(c['prepared_dir'])
+    root = Path(c['prepared_dir']).resolve()
     root.mkdir(parents=True, exist_ok=True)
     generation = Path(mkdtemp(prefix='frames-', dir=root))
     for i, (image, depth) in enumerate(pairs):
-        y, z, valid, native = read_pair(image, depth, c, training=True)
+        y, z, valid, meta = read_pair(image, depth, c, training=True)
         if not valid.any():
             raise ValueError(f'{depth}: frame has no supervised pixels')
-        coords = fixed_coords(y.shape, c['phase_mask_seed'])
+        coords = fixed_coords(y.shape, c['phase_mask_seed'], c['phase_grid_xy'])
         path = generation / f'frame_{i:06d}.npz'
-        np.savez(path, y=gather(y, coords), depth=gather(z, coords),
-                 valid=gather(valid, coords).astype(bool), coords_yx=coords)
+        parts, depths, masks = (gather(a, coords) for a in (y, z, valid))
+        np.savez(path, y=parts, depth=depths, valid=masks, coords_yx=coords)
+        folder = path.with_suffix('')
+        previews(folder, i, y, z, valid, parts, depths, masks, c)
         manifest['train'].append(dict(file=str(path.relative_to(root)), source=str(image.resolve()),
-                                      depth_source=str(depth.resolve()), source_hw=native, hw=y.shape,
+                                      depth_source=str(depth.resolve()), **meta, preview=str((folder / "index.png").relative_to(root)),
                                       sha256=digest(image)))
-        print(f'{image.name} -> {path.name} (8 fixed masks)', flush=True)
+        print(f'{image.name} -> {path.name} ({len(coords)} fixed masks)', flush=True)
     staged = generation / 'manifest.json'
     staged.write_text(json.dumps(manifest, indent=2), encoding='utf8')
     staged.replace(root / 'manifest.json')
