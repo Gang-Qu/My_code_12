@@ -4,7 +4,7 @@ import json
 import numpy as np
 from pathlib import Path
 
-from data import paired_files, read_pair
+from data import keep_training_frame, paired_files, read_pair, train_depth_threshold
 from metrics import EpochStats
 from outputs import plot_test_bins, save_result
 from reconstruct_real import geometry, load_checkpoint, reconstruct
@@ -14,6 +14,7 @@ from sampling import gather
 
 
 def evaluate(net, c, pairs, folder, device, epoch, skipped_frames=(), export_images=True):
+    threshold = train_depth_threshold(c)
     net.eval()
     stats = EpochStats(c)
     rows = []
@@ -21,7 +22,7 @@ def evaluate(net, c, pairs, folder, device, epoch, skipped_frames=(), export_ima
     folder.mkdir(parents=True, exist_ok=True)
     for i, (image, label) in enumerate(pairs):
         y, gt, valid, meta = read_pair(image, label, c)
-        if not valid.any():
+        if not keep_training_frame(meta, threshold):
             skipped.append(str(label))
             continue
         show_mask = export_images and not rows and c.get('save_sampling_preview', False)
@@ -37,7 +38,8 @@ def evaluate(net, c, pairs, folder, device, epoch, skipped_frames=(), export_ima
         if export_images:
             save_result(folder, f'{i:04d}_{image.stem}', y, pred, geometry(y, c, meta), c, gt)
     result = dict(**stats.result(), epoch=epoch, per_image=rows, skipped_frames=skipped,
-                  evaluation=dict(bin_width_m=.1, relative_error_limit=.03,
+                  evaluation=dict(min_depth_in_range_percent=threshold, retained_frames=len(rows),
+                                  total_frames=len(rows) + len(skipped), bin_width_m=.1, relative_error_limit=.03,
                                   rule='abs(pred-gt)/gt <= 0.03', config=c))
     (folder / 'metrics.json').write_text(json.dumps(result, indent=2, allow_nan=False))
     fields = ['lower_m', 'upper_m', 'upper_inclusive', 'valid_pixels', 'pixel_fraction',
@@ -53,6 +55,7 @@ def evaluate(net, c, pairs, folder, device, epoch, skipped_frames=(), export_ima
 if __name__ == '__main__':
     from reconstruct_real import CHECKPOINT
     net, config = load_checkpoint(CHECKPOINT, SETTINGS['device'])
+    config['min_train_depth_percent'] = train_depth_threshold(SETTINGS)
     pairs = paired_files(SETTINGS['val_y'], SETTINGS['val_depth'])
     evaluate(net, config, pairs, Path(SETTINGS['output']) / 'evaluation', SETTINGS['device'],
              Path(CHECKPOINT).stem)

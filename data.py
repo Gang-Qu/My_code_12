@@ -131,11 +131,9 @@ def read_pair(image, depth, c, training=False, audit=None):
     in_range = np.isfinite(z) & (z >= c['depth_min']) & (z <= c['depth_max']) & (z > 0)
     valid = valid & in_range
     region, meta = center_region(source_hw, y.shape, c)
-    if training:
-        meta.update(depth_in_range_percent=100 * int(in_range[region].sum()) / in_range[region].size,
-                    supervised_pixels=int(valid[region].sum()))
+    meta.update(depth_in_range_percent=100 * int(in_range[region].sum()) / in_range[region].size,
+                supervised_pixels=int(valid[region].sum()))
     if audit is not None:
         audit.update(meta)
-        audit.update(crop=depth_counts(z[region], c['depth_min'], c['depth_max']),
-                     supervised_pixels=int(valid[region].sum()))
+        audit.update(crop=depth_counts(z[region], c['depth_min'], c['depth_max']))
     return y[region], np.where(valid, z, 0)[region], valid[region], meta

@@ -48,7 +48,7 @@ def split_report(rows, threshold=0):
 def write_audit(folder, c, splits):
     threshold = train_depth_threshold(c)
     report = dict(min_train_depth_percent=threshold, depth_scale=c['depth_scale'], lower_m=c['depth_min'], upper_m=c['depth_max'],
-                  bounds_inclusive=True, splits={s: split_report(rows, threshold if s == 'train' else 0) for s, rows in splits.items()})
+                  bounds_inclusive=True, splits={s: split_report(rows, threshold) for s, rows in splits.items()})
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / 'depth_range_audit.json'

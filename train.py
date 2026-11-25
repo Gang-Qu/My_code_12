@@ -115,7 +115,7 @@ def check_split_overlap(rows, pairs, c, raw, prefiltered):
             continue
         if prefiltered:
             raise ValueError('Duplicate measurement across train/test')
-        if not read_pair(image, depth, c)[2].any():
+        if not keep_training_frame(read_pair(image, depth, c)[3], train_depth_threshold(c)):
             continue
         for row in group:
             if raw:
@@ -164,8 +164,8 @@ def train(c):
         val_audit = [audit_pair(y, z, c, training=False) for y, z in pairs]
         report = write_audit(run, c, dict(train=train_audit + skipped_at_prepare, val=val_audit))
         rows = [row for row, info in zip(rows, train_audit) if keep_training_frame(info, threshold)]
-        pairs = [pair for pair, info in zip(pairs, val_audit) if info['supervised_pixels'] > 0]
-        skipped_val = report['splits']['val']['zero_supervision_frames']
+        pairs = [pair for pair, info in zip(pairs, val_audit) if keep_training_frame(info, threshold)]
+        skipped_val = report['splits']['val']['skipped_frames']
     no_supervision = f'整个训练集没有满足范围内占比 ≥ {threshold:g}% 且含有效监督点的帧。请核对单位、深度范围及裁剪，或运行 python depth_audit.py'
     if not rows:
         raise ValueError(no_supervision)

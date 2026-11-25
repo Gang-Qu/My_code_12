@@ -75,7 +75,7 @@ class DepthFilterTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     train_depth_threshold(dict(c, min_train_depth_percent=value))
 
-    def test_percent_boundary_is_training_only(self):
+    def test_percent_boundary_applies_to_train_and_test(self):
         torch.set_num_threads(2)
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -92,9 +92,12 @@ class DepthFilterTests(unittest.TestCase):
                 tifffile.imwrite(Path(c['train_depth'])/(name+'.tif'), z)
                 if name == 'below':
                     Image.fromarray(np.full(z.shape, 173, np.uint8)).save(Path(c['train_y'])/'below.png')
-            z = np.zeros((28,56), np.float32)
-            z[5,16] = 2.
-            tifffile.imwrite(Path(c['val_depth'])/'mixed.tif', z)
+            # A retained and a rejected test frame straddle the same threshold.
+            # The rejected test measurement duplicates a retained training image.
+            for name in ('mixed', 'below'):
+                (Path(c['val_depth'])/(name+'.tif')).write_bytes(
+                    (Path(c['train_depth'])/(name+'.tif')).read_bytes())
+            (Path(c['val_y'])/'below.png').write_bytes((Path(c['train_y'])/'mixed.png').read_bytes())
             torch.save(DepthModel(c, load_pretrained=False).da.state_dict(), c['da_weights'])
             for audit in (True, False):
                 c['dataset_audit'] = audit
@@ -110,7 +113,15 @@ class DepthFilterTests(unittest.TestCase):
                     else:
                         self.assertEqual(len(json.loads((run/'skipped_train.json').read_text())), 2)
                     stats = json.loads((run/'test/epoch001/metrics.json').read_text())
-                    self.assertEqual(stats['valid_pixels'], 1)
+                    self.assertEqual(stats['valid_pixels'], 400)
+                    self.assertEqual([r['source'] for r in stats['per_image']], ['mixed.png'])
+                    self.assertEqual({Path(p).stem for p in stats['skipped_frames']}, {'empty', 'below'})
+                    self.assertEqual(sum(b['valid_pixels'] for b in stats['depth_bins']), 400)
+                    self.assertEqual(stats['evaluation']['min_depth_in_range_percent'], 80)
+                    if audit:
+                        val = json.loads((run/'depth_range_audit.json').read_text())['splits']['val']
+                        self.assertEqual(val['retained_frames'], 1)
+                        self.assertEqual(set(val['skipped_frames']), set(stats['skipped_frames']))
 
     def test_audit_off_still_filters_raw_and_prepared(self):
         torch.set_num_threads(2)
@@ -151,7 +162,8 @@ class DepthFilterTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             c = self.fixture(root)
-            pairs = [(Path(c['val_y'])/'empty.png', Path(c['val_depth'])/'empty.tif')]
+            c['min_train_depth_percent'] = 80
+            pairs = [(Path(c['val_y'])/'mixed.png', Path(c['val_depth'])/'mixed.tif')]
             # Identity accepts eval(), but cannot perform a depth-model forward.
             result = evaluate(torch.nn.Identity(), c, pairs, root/'eval', 'cpu', 1)
             self.assertIsNone(result['accuracy_3pct'])
