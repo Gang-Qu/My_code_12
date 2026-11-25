@@ -107,6 +107,18 @@ def image_files(folder):
     return files
 
 
+def train_depth_threshold(c):
+    pct = c.get('min_train_depth_percent', 80.)
+    if type(pct) not in (int, float) or not 0 <= pct <= 100:
+        raise ValueError('min_train_depth_percent must be a percentage between 0 and 100')
+    return pct
+
+
+def keep_training_frame(info, threshold):
+    return (info['supervised_pixels'] > 0 and
+            (threshold == 0 or info.get('depth_in_range_percent', info.get('depth_in_range_lower_bound_percent', 0)) >= threshold))
+
+
 def read_pair(image, depth, c, training=False, audit=None):
     y, valid = measurement(image, c)
     source_hw = y.shape
@@ -116,9 +128,14 @@ def read_pair(image, depth, c, training=False, audit=None):
         audit.update(source=str(depth), original=depth_counts(z, c['depth_min'], c['depth_max']))
     target = c['expected_hw'] if training or c.get('resize_before_inference_crop', False) else source_hw
     y, valid, z = resize_pair(y, valid, z, target)
-    valid = valid & np.isfinite(z) & (z >= c['depth_min']) & (z <= c['depth_max']) & (z > 0)
+    in_range = np.isfinite(z) & (z >= c['depth_min']) & (z <= c['depth_max']) & (z > 0)
+    valid = valid & in_range
     region, meta = center_region(source_hw, y.shape, c)
+    if training:
+        meta.update(depth_in_range_percent=100 * int(in_range[region].sum()) / in_range[region].size,
+                    supervised_pixels=int(valid[region].sum()))
     if audit is not None:
+        audit.update(meta)
         audit.update(crop=depth_counts(z[region], c['depth_min'], c['depth_max']),
                      supervised_pixels=int(valid[region].sum()))
     return y[region], np.where(valid, z, 0)[region], valid[region], meta

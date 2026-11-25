@@ -25,7 +25,7 @@ class DepthAuditTests(unittest.TestCase):
     def test_report_uses_unfiltered_source_and_actual_crop(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            c = dict(SETTINGS, expected_hw=None, center_crop_hw=[2, 2], depth_scale=.001)
+            c = dict(SETTINGS, min_train_depth_percent=0, expected_hw=None, center_crop_hw=[2, 2], depth_scale=.001)
             y = np.ones((4, 4), np.float32)
             y[1, 1] = np.nan
             z = np.full((4, 4), 10000., np.float32)

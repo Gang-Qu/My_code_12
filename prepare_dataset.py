@@ -6,7 +6,7 @@ from tempfile import mkdtemp
 
 import numpy as np
 
-from data import paired_files, read_pair
+from data import paired_files, read_pair, keep_training_frame, train_depth_threshold
 from sampling import RULE, fixed_coords, gather
 from settings import SETTINGS
 from depth_audit import write_audit
@@ -31,7 +31,8 @@ def digest(path):
 
 
 def prepare(c):
-    manifest = dict(rule=RULE, preprocessing=signature(c), train=[], skipped_train=[])
+    threshold = train_depth_threshold(c)
+    manifest = dict(min_train_depth_percent=threshold, rule=RULE, preprocessing=signature(c), train=[], skipped_train=[])
     pairs = paired_files(c['train_y'], c['train_depth'])
     root = Path(c['prepared_dir']).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -39,8 +40,8 @@ def prepare(c):
     for i, (image, depth) in enumerate(pairs):
         audit = {} if c.get('dataset_audit', True) else None
         y, z, valid, meta = read_pair(image, depth, c, training=True, audit=audit)
-        if not valid.any():
-            manifest['skipped_train'].append(audit or dict(source=str(depth), supervised_pixels=0))
+        if not keep_training_frame(meta, threshold):
+            manifest['skipped_train'].append(audit or dict(source=str(depth), **meta))
             continue
         coords = fixed_coords(y.shape, c['phase_mask_seed'], c['phase_grid_xy'])
         path = generation / f'frame_{i:06d}.npz'
@@ -58,7 +59,7 @@ def prepare(c):
         audits = [row['depth_audit'] for row in manifest['train']] + manifest['skipped_train']
         write_audit(generation, c, {'train': audits})
     if not manifest['train']:
-        raise ValueError(f"整个训练集筛选后没有监督点。请核对深度单位、范围和裁剪区域，或运行 python depth_audit.py")
+        raise ValueError(f"整个训练集没有满足范围内占比 ≥ {threshold:g}% 且含有效监督点的帧。请核对深度单位、范围和裁剪区域，或运行 python depth_audit.py")
     staged = generation / 'manifest.json'
     staged.write_text(json.dumps(manifest, indent=2), encoding='utf8')
     staged.replace(root / 'manifest.json')

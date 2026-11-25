@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from data import paired_files, read_pair
+from data import paired_files, read_pair, keep_training_frame, train_depth_threshold
 from evaluate import evaluate
 from depth_audit import audit_pair, write_audit
 from metrics import loss_terms, make_amp
@@ -53,23 +53,40 @@ def training_records(c):
         saved.update(phase_grid_xy=[4, 2], center_crop_hw=None)
     if manifest['rule'] not in (LEGACY_RULE, RULE) or saved != signature(c):
         raise ValueError('Sampling or preprocessing changed. Run prepare_dataset.py again.')
-    return manifest['train'], manifest.get('skipped_train', [])
+    skipped = manifest.get('skipped_train', [])
+    if any(keep_training_frame(info, train_depth_threshold(c)) for info in skipped):
+        raise ValueError('降低阈值后有先前未缓存的帧重新达标；请运行 python prepare_dataset.py 或使用 raw 模式。')
+    return manifest['train'], skipped
+
+
+def cached_frame_info(row, c, valid=None):
+    info = dict(row.get('depth_audit', {}))
+    info.setdefault('source', row.get('depth_source', row['file']))
+    if 'depth_in_range_percent' in row:
+        info.update(depth_in_range_percent=row['depth_in_range_percent'],
+                    supervised_pixels=row['supervised_pixels'])
+    elif 'crop' in info:
+        info['depth_in_range_percent'] = 100 * info['crop']['in_range'] / info['crop']['pixels']
+    else:
+        if valid is None:
+            with np.load(Path(c['prepared_dir']) / row['file']) as frame:
+                valid = frame['valid']
+        count = int(valid.sum())
+        h, w = row['hw']
+        info.update(supervised_pixels=count, depth_in_range_lower_bound_percent=100 * count / (h*w))
+        # Old NPZ zeros can mean either invalid measurement or out-of-range GT.
+        if count and not keep_training_frame(info, train_depth_threshold(c)):
+            if not all(row.get(k) and Path(row[k]).is_file() for k in ('source', 'depth_source')):
+                raise ValueError(f"{row['file']}: 旧缓存缺少深度覆盖率；请用原始配对数据重新预处理。")
+            _, _, _, meta = read_pair(row['source'], row['depth_source'], c, training=True)
+            info['depth_in_range_percent'] = meta['depth_in_range_percent']
+    return info
 
 
 def audit_training_rows(rows, c, raw):
-    result = []
-    for row in rows:
-        if raw:
-            audit = audit_pair(row['image'], row['depth'], c, training=True)
-        elif 'depth_audit' in row:
-            audit = row['depth_audit']
-        else:
-            # Old caches have already replaced excluded labels by zero.
-            with np.load(Path(c['prepared_dir']) / row['file']) as frame:
-                audit = dict(source=row['file'], supervised_pixels=int(frame['valid'].sum()),
-                             range_status='pre-filter labels unavailable in legacy cache')
-        result.append(audit)
-    return result
+    if raw:
+        return [audit_pair(r['image'], r['depth'], c, training=True) for r in rows]
+    return [cached_frame_info(r, c) for r in rows]
 
 
 def check_split_overlap(rows, pairs, c, raw, prefiltered):
@@ -102,11 +119,10 @@ def check_split_overlap(rows, pairs, c, raw, prefiltered):
             continue
         for row in group:
             if raw:
-                valid = read_pair(row['image'], row['depth'], c, training=True)[2]
+                info = read_pair(row['image'], row['depth'], c, training=True)[3]
             else:
-                with np.load(Path(c['prepared_dir']) / row['file']) as frame:
-                    valid = frame['valid']
-            if valid.any():
+                info = cached_frame_info(row, c)
+            if keep_training_frame(info, train_depth_threshold(c)):
                 raise ValueError('Duplicate measurement across train/test')
 
 
@@ -134,6 +150,7 @@ def train(c):
     export_every = c.get('test_export_every', 1)
     if type(export_every) is not int or export_every < 1:
         raise ValueError('test_export_every must be a positive integer')
+    threshold = train_depth_threshold(c)
     rows, skipped_at_prepare = training_records(c)
     raw_input = c.get('training_input', 'prepared') == 'raw'
     sample_online = raw_input or c['phase_mask_mode'] == 'learned'
@@ -146,10 +163,10 @@ def train(c):
         train_audit = audit_training_rows(rows, c, raw_input)
         val_audit = [audit_pair(y, z, c, training=False) for y, z in pairs]
         report = write_audit(run, c, dict(train=train_audit + skipped_at_prepare, val=val_audit))
-        rows = [row for row, info in zip(rows, train_audit) if info['supervised_pixels'] > 0]
+        rows = [row for row, info in zip(rows, train_audit) if keep_training_frame(info, threshold)]
         pairs = [pair for pair, info in zip(pairs, val_audit) if info['supervised_pixels'] > 0]
         skipped_val = report['splits']['val']['zero_supervision_frames']
-    no_supervision = '整个训练集在裁剪和有效深度筛选后没有监督点。请核对单位、深度范围及裁剪，或运行 python depth_audit.py'
+    no_supervision = f'整个训练集没有满足范围内占比 ≥ {threshold:g}% 且含有效监督点的帧。请核对单位、深度范围及裁剪，或运行 python depth_audit.py'
     if not rows:
         raise ValueError(no_supervision)
     check_split_overlap(rows, pairs, c, raw_input, audit_enabled)
@@ -170,7 +187,7 @@ def train(c):
             row = rows[idx]
             if raw_input:
                 y, gt, valid, meta = read_pair(row['image'], row['depth'], c, training=True)
-                if not audit_enabled and epoch == 1 and not valid.any():
+                if not audit_enabled and epoch == 1 and not keep_training_frame(meta, threshold):
                     empty_indices.add(idx)
                     continue
                 y, gt, valid = (torch.from_numpy(a).to(device) for a in (y, gt, valid))
@@ -178,7 +195,7 @@ def train(c):
                 hw = tuple(row['hw'])
                 with np.load(Path(c['prepared_dir']) / row['file']) as frame:
                     mask = frame['valid']
-                    if not audit_enabled and epoch == 1 and not mask.any():
+                    if not audit_enabled and epoch == 1 and not keep_training_frame(cached_frame_info(row, c, mask), threshold):
                         empty_indices.add(idx)
                         continue
                     valid = torch.from_numpy(mask).to(device)

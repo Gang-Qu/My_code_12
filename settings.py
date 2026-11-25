@@ -13,6 +13,7 @@ SETTINGS = dict(
     save_sampling_preview=True,  # first raw test frame of each epoch
 
     black_level=0., white_level=None, gain=1., input_encoding='linear',
+    min_train_depth_percent=80.,  # percent of all crop pixels with in-range GT (inclusive)
     dataset_audit=False,  # True generates the full pre-training depth-range report
     depth_scale=1., depth_min=.5, depth_max=5.,
     da_model_type='metric',  # 'metric' or 'relative'

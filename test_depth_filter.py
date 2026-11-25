@@ -10,6 +10,7 @@ import tifffile
 import torch
 
 from evaluate import evaluate
+from data import keep_training_frame, read_pair, train_depth_threshold
 from model import DepthModel
 from prepare_dataset import prepare
 from settings import SETTINGS
@@ -18,7 +19,7 @@ from train import train
 
 class DepthFilterTests(unittest.TestCase):
     def fixture(self, root):
-        c = dict(SETTINGS, dataset_audit=True, prepared_dir=str(root/'prep'), output=str(root/'out'),
+        c = dict(SETTINGS, dataset_audit=True, min_train_depth_percent=0, prepared_dir=str(root/'prep'), output=str(root/'out'),
                  da_weights=str(root/'da.pt'), expected_hw=None, center_crop_hw=None,
                  device='cpu', epochs=1, freeze_da=True, use_refiner=True,
                  save_sampling_preview=False)
@@ -58,6 +59,58 @@ class DepthFilterTests(unittest.TestCase):
                 self.assertEqual(metrics['valid_pixels'], 3)
                 self.assertEqual([r['source'] for r in metrics['per_image']], ['mixed.png'])
                 self.assertEqual(len(metrics['skipped_frames']), 1)
+
+    def test_depth_coverage_is_independent_of_measurement_validity(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            c = dict(SETTINGS, expected_hw=None, center_crop_hw=None)
+            tifffile.imwrite(root/'image.tif', np.array([[np.nan, 1, 1, 1, 1]], np.float32))
+            tifffile.imwrite(root/'depth.tif', np.array([[.5, 5., 1., 1., 0.]], np.float32))
+            _, _, valid, meta = read_pair(root/'image.tif', root/'depth.tif', c, training=True)
+            self.assertEqual(meta['depth_in_range_percent'], 80)
+            self.assertEqual(valid.sum(), 3)
+            self.assertTrue(keep_training_frame(meta, train_depth_threshold(c)))
+            self.assertFalse(keep_training_frame(meta, 81))
+            for value in (-1, 101, float('nan'), True):
+                with self.assertRaises(ValueError):
+                    train_depth_threshold(dict(c, min_train_depth_percent=value))
+
+    def test_percent_boundary_is_training_only(self):
+        torch.set_num_threads(2)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            c = self.fixture(root)
+            c.update(min_train_depth_percent=80, center_crop_hw=[20, 25])
+            # The full frame is mostly outside range. In the crop one image has
+            # exactly 400/500 in range and its sibling only 399/500.
+            for name, n in [('mixed', 400), ('below', 399)]:
+                z = np.full((28, 56), 10., np.float32)
+                region = np.full(500, np.nan, np.float32)
+                region[:n:2] = .5
+                region[1:n:2] = 5.
+                z[4:24, 15:40] = region.reshape(20, 25)
+                tifffile.imwrite(Path(c['train_depth'])/(name+'.tif'), z)
+                if name == 'below':
+                    Image.fromarray(np.full(z.shape, 173, np.uint8)).save(Path(c['train_y'])/'below.png')
+            z = np.zeros((28,56), np.float32)
+            z[5,16] = 2.
+            tifffile.imwrite(Path(c['val_depth'])/'mixed.tif', z)
+            torch.save(DepthModel(c, load_pretrained=False).da.state_dict(), c['da_weights'])
+            for audit in (True, False):
+                c['dataset_audit'] = audit
+                for mode in ('raw', 'prepared'):
+                    c['training_input'] = mode
+                    if mode == 'prepared':
+                        self.assertEqual(len(prepare(c)['train']), 1)
+                    run = train(c)
+                    if audit:
+                        summary = json.loads((run/'depth_range_audit.json').read_text())['splits']['train']
+                        self.assertEqual(summary['retained_frames'], 1)
+                        self.assertEqual(summary['supervised_pixels'], 400)
+                    else:
+                        self.assertEqual(len(json.loads((run/'skipped_train.json').read_text())), 2)
+                    stats = json.loads((run/'test/epoch001/metrics.json').read_text())
+                    self.assertEqual(stats['valid_pixels'], 1)
 
     def test_audit_off_still_filters_raw_and_prepared(self):
         torch.set_num_threads(2)
