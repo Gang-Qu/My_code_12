@@ -4,6 +4,10 @@ import numpy as np
 import tifffile
 from PIL import Image, ImageDraw
 
+PREVIEW_GAP = 92
+PREVIEW_TOP = 26
+
+
 def preview(path,y,z,c,gt=None,full_resolution=False):
     # Only PNG is display-scaled; TIFF/NPZ retain exact metric values.
     def depth(v):
@@ -21,17 +25,17 @@ def preview(path,y,z,c,gt=None,full_resolution=False):
     # One identical continuous scale beside each depth panel. Leave sufficient
     # vertical spacing for 0.25 m labels, even for small preview images.
     bar_h=max(im.height, int(np.ceil((hi-lo)/.25))*16+1)
-    gap=92
+    gap=PREVIEW_GAP
     canvas=Image.new('RGB',(im.width+gap*(len(panels)-1),bar_h+40),'white')
     draw=ImageDraw.Draw(canvas)
     offset=0
     for i,label in enumerate(labels):
         left=i*im.width//len(panels);right=(i+1)*im.width//len(panels)
         piece=im.crop((left,0,right,im.height))
-        canvas.paste(piece,(offset,26));draw.text((offset+5,5),label,fill='black')
+        canvas.paste(piece,(offset,PREVIEW_TOP));draw.text((offset+5,5),label,fill='black')
         offset+=piece.width
         if i:
-            x=offset+8;top=26
+            x=offset+8;top=PREVIEW_TOP
             ramp=np.linspace(hi,lo,bar_h,dtype=np.float32)[:,None]
             colors=(depth(ramp)*255).round().astype(np.uint8)
             canvas.paste(Image.fromarray(np.repeat(colors,16,axis=1)),(x,top))
@@ -43,6 +47,34 @@ def preview(path,y,z,c,gt=None,full_resolution=False):
             draw.text((x,8),'m',fill='black')
             offset+=gap
     canvas.save(path)
+
+def read_test_panels(path):
+    """Extract full-size RGB depth panels from a save_result test PNG."""
+    with Image.open(path) as image:
+        if image.format != 'PNG' or image.mode != 'RGB':
+            raise ValueError(f'{path}: 需要 test 导出的 RGB 拼图 PNG')
+        width, remainder = divmod(image.width - 2 * PREVIEW_GAP, 3)
+        if remainder or width <= 0 or image.height <= PREVIEW_TOP:
+            raise ValueError(f'{path}: 不符合三面板 test PNG 布局')
+        panels = []
+        for x in (width, 2 * width + PREVIEW_GAP):
+            # The depth palette has complementary red/blue, so white is
+            # unambiguously the footer even when the colorbar is taller than the image.
+            stripe = np.asarray(image.crop((x, PREVIEW_TOP, x+1, image.height)))[:, 0]
+            footer = np.flatnonzero(np.all(stripe == 255, axis=1))
+            if not footer.size or footer[0] == 0:
+                raise ValueError(f'{path}: 找不到深度面板底边')
+            bottom = PREVIEW_TOP + int(footer[0])
+            panel = np.asarray(image.crop((x, PREVIEW_TOP, x+width, bottom)))
+            rb = panel[..., 0].astype(np.int16) + panel[..., 2]
+            if rb.min() < 254 or rb.max() > 256:
+                raise ValueError(f'{path}: 面板颜色与 test 深度示意图不符')
+            panels.append(panel)
+        pred, gt = panels
+        if pred.shape != gt.shape:
+            raise ValueError(f'{path}: 重建和真值面板尺寸不一致')
+        return gt, pred
+
 
 def save_result(folder,name,y,z,g,c,gt=None,save_arrays=True):
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)

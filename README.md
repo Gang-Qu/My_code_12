@@ -203,13 +203,17 @@ phase_grid_xy = [4, 2]
 
 ## 按多张 mask 评估一幅重建深度图
 
-打开 `evaluate_masks.py`，在文件顶部的 `CONFIG` 填写 `mask_dir`（mask 目录）、`gt_file`（真值文件）、`pred_file`（重建文件）和 `output`（输出目录）。直接在 IDE 中运行该文件，或从仓库根目录执行 `python evaluate_masks.py`。[评估脚本](evaluate_masks.py)
+在 `evaluate_masks.py` 顶部的 `CONFIG` 填好三个路径，直接运行该文件即可。[评估脚本](evaluate_masks.py)
 
-- **深度单位。** 示例配置假设 GT 是米、16 位整数重建图是毫米，分别设置 `gt_scale=1.0` 和 `pred_scale=0.001`。请按实际文件编码填写。读取本仓库以米保存的 `*_depth_m.tiff` 时设置 `pred_scale=1.0`。重建深度（米）等于原始像素值乘 `pred_scale` 再加 `pred_offset`。
-- **对齐。** 默认以重建深度图的实际高宽为基准。GT 和每张 mask 可有不同的分辨率，脚本分别按最近邻缩放到目标网格，再应用 mask 和计算误差。最近邻保留原始深度值和二值边界。直接缩放适用于覆盖同一视野的图像。如果重建仅覆盖原始 GT 的中心区域，在 `geometry_npz` 填入同帧 NPZ 路径，按记录的缩放尺寸和裁剪原点对齐 GT；mask 应对应重建视野。mask 灰度或任一 RGB 通道大于 0 即选中，透明像素忽略。
-- **逐像素误差。** 在 `CONFIG` 设置 `depth_min` 和 `depth_max`（米）。只评估 mask 内真值有限、为正且处于该闭区间的像素。预测越界或为零仍计入误差。MAE、RMSE 的单位为米，3% 准确度为 `abs(预测−真值) ≤ 0.03 × 真值` 的有效像素比例。空区域的指标保存为 `null`。
-- **直接查看 8 位 PNG。** 打开每个 mask 子目录中的 `gt_masked.png`（真值）、`prediction_masked.png`（重建）和 `abs_error.png`（绝对误差）。真值与重建共用 `depth_min` 至 `depth_max` 的灰度范围，同一深度显示为同一亮度，越远越亮。误差图越亮表示误差越大，在 `CONFIG` 中用 `preview_error_max_m` 设置白色对应的误差（默认 0.10 m）。上下限之间线性映射为灰度 32–255，超出显示范围时取端点亮度，黑色表示背景或无效位置。
-- **读取数值。** 同一目录的 `mask.png` 保存缩放后的掩膜，`gt_masked.tiff` 和 `prediction_masked.tiff` 保存输入编码的深度值，`abs_error_m.tiff` 保存以米为单位的绝对误差。MAE、RMSE 和 3% 准确度使用转为米的原始深度计算。
+```python
+test_png = "output/你的运行目录/test/epoch001/0000_scene01.png"  # 选一帧测试拼图
+mask_dir = "data/scene01/masks"
+output = "output/mask_eval"
+```
+
+- **图像来源与尺寸。** 选择带有 Measurement、Depth (m)、GT (m) 三个面板的帧 PNG。脚本从中提取重建和真值的原始 RGB 示意图，避开标题、色条、间隔和底部留白。每张 mask 以最近邻缩放至面板的实际宽高。真值和重建保留测试图中的像素、颜色和长宽比。mask 应覆盖同一裁剪视野。
+- **查看结果。** 输出按测试帧和 mask 分目录。在 `gt_masked.png`、`prediction_masked.png` 查看对应的彩色示意图，黑色为 mask 外区域。测试文件夹中只有 PNG 时，也能直接生成这两张图和 `mask.png`，位于 `output/帧名/png_only/mask文件名/`。
+- **计算误差。** 测试 PNG 经过颜色量化，超出显示范围的深度也会饱和。脚本自动查找测试 PNG 旁边的同名 NPZ，从 `gt_m` 与 `depth_m` 读取米制深度，先核对它们与两个面板的高宽，再计算 MAE、RMSE 和相对误差 ≤3% 的准确度。此时图片和误差图在 `output/帧名/mask文件名/`，统计在 `output/帧名/metrics.json`。有效 GT 范围和误差图的显示上限仍在 `CONFIG` 中设置。仅有 PNG 时，`png_only/metrics.json` 记录尺寸和缺少米制数据的状态。
 - **汇总。** 在 `metrics.json` 的 `per_mask` 查看每张 mask 的指标和命中数。`mean_over_masks` 对各非空 mask 的指标等权求均值；`union_unique_pixels` 对所有 mask 的并集计算一次，每个有效像素只计一次；`pooled_with_repeats` 按每张 mask 的有效像素数加权，重叠像素按出现次数计入。
 
 ## 结果与验证范围

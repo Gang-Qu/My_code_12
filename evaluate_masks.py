@@ -8,20 +8,16 @@ import tifffile
 
 from data import image_files, read_array
 from metrics import RELATIVE_ERROR_LIMIT
+from outputs import read_test_panels
 
 
 # 在这里填写路径和参数，然后直接运行本文件。相对路径以运行时工作目录为准。
 CONFIG = dict(
     mask_dir="data/scene01/masks",
-    gt_file="data/gt/scene01.tiff",
-    pred_file="data/reconstruction/scene01.png",
-    output="output/mask_eval/scene01",
-    gt_scale=1.0,       # 示例真值以米存储；毫米填 0.001
-    pred_scale=0.001,   # 示例重建图为 uint16 毫米；米制 TIFF 填 1.0
-    pred_offset=0.0,    # 重建深度（米）= 像素值 * pred_scale + pred_offset
+    test_png="output/run/test/epoch001/0000_scene01.png",  # 指定一帧测试拼图
+    output="output/mask_eval",
     depth_min=0.5, depth_max=5.0,  # 真值有效范围，米，含端点
     preview_error_max_m=0.10,  # 8 位误差 PNG 的白色上限，单位米
-    geometry_npz=None,  # 默认直接 resize；原始 GT 需复现裁剪时填同帧 NPZ
 )
 
 
@@ -114,9 +110,26 @@ def evaluate_masks(mask_dir, gt_file, pred_file, output, *, gt_scale=1., pred_sc
     gt_raw = align_gt(depth_image(gt_file), pred_raw.shape, geometry_npz)
     gt = gt_raw.astype(np.float64) * gt_scale
     pred = pred_raw.astype(np.float64) * pred_scale + pred_offset
+    previews = (gray8(gt, np.isfinite(gt) & (gt > 0), depth_min, depth_max),
+                gray8(pred, np.isfinite(pred) & (pred > 0), depth_min, depth_max))
+    source = dict(gt_file=str(gt_file), pred_file=str(pred_file), mask_dir=str(mask_dir),
+                  geometry_npz=str(geometry_npz) if geometry_npz else None,
+                  gt_scale=gt_scale, pred_scale=pred_scale, pred_offset_m=pred_offset)
+    return evaluate_arrays(masks, output, gt_raw, pred_raw, gt, pred, previews, depth_min,
+                           depth_max, preview_error_max_m, source)
+
+
+def save_mask_views(folder, mask, previews):
+    folder.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(mask).save(folder / 'mask.png')
+    for name, panel in zip(('gt', 'prediction'), previews):
+        selection = mask[..., None] if panel.ndim == 3 else mask
+        Image.fromarray(np.where(selection, panel, np.uint8(0))).save(folder / f'{name}_masked.png')
+
+
+def evaluate_arrays(masks, output, gt_raw, pred_raw, gt, pred, previews, depth_min,
+                    depth_max, preview_error_max_m, source):
     valid = np.isfinite(gt) & (gt > 0) & (gt >= depth_min) & (gt <= depth_max)
-    gt_preview = gray8(gt, np.isfinite(gt) & (gt > 0), depth_min, depth_max)
-    pred_preview = gray8(pred, np.isfinite(pred) & (pred > 0), depth_min, depth_max)
     union = np.zeros_like(valid)
     pooled = np.zeros(4)
     rows = []
@@ -129,10 +142,8 @@ def evaluate_masks(mask_dir, gt_file, pred_file, output, *, gt_scale=1., pred_sc
         pooled += totals
         rows.append(dict(mask=path.name, covered_pixels=int(mask.sum()), **summarize(totals)))
         folder = output / path.name
-        folder.mkdir(parents=True, exist_ok=True)
-        Image.fromarray(mask).save(folder / 'mask.png')
-        for name, raw, preview in [('gt', gt_raw, gt_preview), ('prediction', pred_raw, pred_preview)]:
-            Image.fromarray(np.where(mask, preview, np.uint8(0))).save(folder / f'{name}_masked.png')
+        save_mask_views(folder, mask, previews)
+        for name, raw in [('gt', gt_raw), ('prediction', pred_raw)]:
             tifffile.imwrite(folder / f'{name}_masked.tiff', np.where(mask, raw, 0))
         errors = np.full(pred.shape, np.nan, dtype=np.float32)
         errors[selected] = np.abs(pred[selected] - gt[selected])
@@ -142,9 +153,7 @@ def evaluate_masks(mask_dir, gt_file, pred_file, output, *, gt_scale=1., pred_sc
     used = [row for row in rows if row['valid_pixels']]
     mean = {key: float(np.mean([row[key] for row in used])) if used else None
             for key in ('mae_m', 'rmse_m', 'accuracy_3pct')}
-    result = dict(gt_file=str(gt_file), pred_file=str(pred_file), mask_dir=str(mask_dir),
-                  geometry_npz=str(geometry_npz) if geometry_npz else None,
-                  gt_scale=gt_scale, pred_scale=pred_scale, pred_offset_m=pred_offset,
+    result = dict(**source,
                   depth_range_m=[depth_min, depth_max], shape_hw=list(pred.shape),
                   preview_error_max_m=preview_error_max_m,
                   gt_dtype=str(gt_raw.dtype), pred_dtype=str(pred_raw.dtype),
@@ -156,8 +165,39 @@ def evaluate_masks(mask_dir, gt_file, pred_file, output, *, gt_scale=1., pred_sc
     return result
 
 
+def evaluate_test_png(mask_dir, test_png, output, *, depth_min=.5, depth_max=5., preview_error_max_m=.10):
+    path = Path(test_png)
+    gt_view, pred_view = read_test_panels(path)
+    views = (gt_view, pred_view)
+    shape = gt_view.shape[:2]
+    masks = image_files(mask_dir)
+    npz = path.with_suffix('.npz')
+    folder = Path(output) / path.stem
+    source = dict(test_png=str(path), mask_dir=str(mask_dir), metric_source=None)
+    if not npz.is_file():
+        folder = folder / 'png_only'
+        for m in masks:
+            save_mask_views(folder / m.name, resized_mask(m, shape), views)
+        result = dict(**source, shape_hw=list(shape), status='仅导出示意图：缺少同名米制 NPZ')
+        (folder / 'metrics.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf8')
+        return result
+    with np.load(npz, allow_pickle=False) as f:
+        gt, pred = f['gt_m'], f['depth_m']
+    if gt.shape != shape or pred.shape != shape:
+        raise ValueError(f'{npz}: GT {gt.shape}、重建 {pred.shape} 与 PNG 面板 {shape} 应逐像素对应')
+    if not np.isfinite([depth_min, depth_max, preview_error_max_m]).all() or not (
+        0 <= depth_min < depth_max and preview_error_max_m > 0
+    ):
+        raise ValueError('请检查真值有效深度范围和误差图上限')
+    source['metric_source'] = str(npz)
+    return evaluate_arrays(masks, folder, gt, pred, gt.astype(np.float64), pred.astype(np.float64),
+                           views, depth_min, depth_max, preview_error_max_m, source)
+
+
 if __name__ == '__main__':
-    result = evaluate_masks(**CONFIG)
-    for name in ('mean_over_masks', 'union_unique_pixels'):
-        print(name, json.dumps(result[name], ensure_ascii=False))
-    print(Path(CONFIG['output']) / 'metrics.json')
+    result = evaluate_test_png(**CONFIG)
+    if result['metric_source']:
+        print(json.dumps(result['union_unique_pixels'], ensure_ascii=False))
+    else:
+        print(result['status'])
+    print(Path(CONFIG['output']) / Path(CONFIG['test_png']).stem)

@@ -7,7 +7,8 @@ import numpy as np
 from PIL import Image
 import tifffile
 
-from evaluate_masks import align_gt, evaluate_masks
+from evaluate_masks import align_gt, evaluate_masks, evaluate_test_png
+from outputs import preview, read_test_panels
 
 
 class MaskEvaluationTests(unittest.TestCase):
@@ -55,6 +56,45 @@ class MaskEvaluationTests(unittest.TestCase):
             np.testing.assert_array_equal(tifffile.imread(folder/'gt_masked.tiff'), [[1, 1, 0, 0]])
             np.testing.assert_allclose(tifffile.imread(folder/'abs_error_m.tiff'),
                                        [[.03, .031, np.nan, np.nan]], rtol=1e-6)
+
+    def test_saved_test_png_dimensions_colors_and_mask_metrics(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            masks = root/'masks'
+            masks.mkdir()
+            Image.fromarray(np.array([[255, 0]], np.uint8)).save(masks/'left.png')
+            c = dict(depth_min=1., depth_max=5.)
+            for h, w in [(7, 11), (285, 17)]:
+                gt = np.ones((h, w), np.float32)
+                pred = np.full_like(gt, 5.)
+                gt[-1, 0], pred[-1, 0] = 5., 1.
+                path = root/f'0000_scene{h}.png'
+                preview(path, np.zeros_like(gt), pred, c, gt, full_resolution=True)
+                gt_rgb, pred_rgb = read_test_panels(path)
+                self.assertEqual(gt_rgb.shape, (h, w, 3))
+                np.testing.assert_array_equal(gt_rgb[0, 0], [0, 0, 255])
+                np.testing.assert_array_equal(pred_rgb[0, 0], [255, 255, 0])
+                np.testing.assert_array_equal(pred_rgb[-1, 0], gt_rgb[0, 0])
+                out = root/'out'
+                for numeric in (False, True):
+                    if numeric:
+                        np.savez(path.with_suffix('.npz'), gt_m=gt, depth_m=pred)
+                    result = evaluate_test_png(masks, path, out, depth_min=1., depth_max=5.)
+                    folder = out/path.stem
+                    if numeric:
+                        self.assertAlmostEqual(result['union_unique_pixels']['mae_m'], 4.)
+                    else:
+                        self.assertIsNone(result['metric_source'])
+                        folder = folder/'png_only'
+                    for name, rgb in [('gt', gt_rgb), ('prediction', pred_rgb)]:
+                        with Image.open(folder/'left.png'/f'{name}_masked.png') as im:
+                            self.assertEqual(im.size, (w, h))
+                            masked = np.asarray(im)
+                            np.testing.assert_array_equal(masked[:, 0], rgb[:, 0])
+                            self.assertFalse(masked[:, -1].any())
+                np.savez(path.with_suffix('.npz'), gt_m=gt, depth_m=pred.T)
+                with self.assertRaisesRegex(ValueError, '逐像素'):
+                    evaluate_test_png(masks, path, out)
 
     def test_align_raw_gt_from_recorded_geometry(self):
         raw = np.arange(24, dtype=np.uint16).reshape(4, 6)
