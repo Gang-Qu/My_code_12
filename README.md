@@ -178,7 +178,14 @@ phase_grid_xy = [4, 2]
 | `y`、`depth`、`valid` | [a×b, ceil(H/b), ceil(W/a)] | 同一点的测量、米制深度和有效性，H、W 为裁剪后的高宽 |
 | `coords_yx` | [a×b, ceil(H/b), ceil(W/a), 2] | 裁剪网格的零基 [行,列]。有效坐标加上清单的 `crop_origin_yx` 即得缩放网格坐标 |
 
-测试和实拍默认直接从原始大图中心截取 `center_crop_hw`，再按训练记录的布局逐张重建并拼回**裁剪尺寸**保存。如需与训练一致地先缩放再中心裁剪，在训练配置设 `resize_before_inference_crop=True`。原图小于指定裁剪时会报告尺寸；设 `center_crop_hw=None` 则保留当前网格全幅。旧固定掩码 checkpoint 沿用其保存的几何配置；早期缺少网格配置的权重使用原有的全幅八掩码。
+### 实拍重建的中心裁剪
+
+**实拍输入先按 `center_crop_hw=[高,宽]` 中心裁剪，再分解为子图、预测和回填。** 训练期间开启 `real_each_epoch=True` 时，每轮实拍使用该次训练配置。单独运行 `reconstruct_real.py` 时，裁剪尺寸、`expected_hw` 和 `resize_before_inference_crop` 均来自所选 checkpoint 保存的配置。因此，用旧权重重建时，只修改当前 `settings.py` 的裁剪尺寸，实际仍会沿用旧值。[实拍入口](reconstruct_real.py) · [训练入口](train.py)
+
+默认 `resize_before_inference_crop=False`，直接从原图中心裁剪。例如 3000×5000 的原始测量图使用默认裁剪 1036×2072 时，左上角为零基坐标 `[982,1464]`。若 checkpoint 设置了 `resize_before_inference_crop=True` 且 `expected_hw=[1536,2500]`，则会先缩放到该尺寸，再从 `[250,214]` 裁剪。裁剪尺寸为 `None` 或旧配置缺少该字段时使用当前网格全幅；裁剪大于该网格时会报错。[裁剪实现](data.py)
+
+**核对自己的结果**：打开实拍输出的同帧 NPZ，读取 `geometry_json` 中的 `source_hw`、`resized_hw`、`crop_origin_yx` 和 `hw`，分别对应原始尺寸、裁剪前尺寸、裁剪左上角和最终尺寸。`depth_m.shape` 与米制 TIFF 的高宽都等于 `hw`。PNG 含测量图、深度图和色条，画布更宽。已用合成 57×91 TIFF 验证：裁剪 51×73 时，直接裁剪的起点为 `[3,9]`，先缩放到 56×84 再裁剪的起点为 `[2,5]`；两种模式保存的测量像素均与预期裁剪逐点一致。[保存实现](outputs.py)
+
 
 ### 已生成的六子图示例
 
