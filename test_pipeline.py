@@ -54,7 +54,7 @@ class PipelineTest(unittest.TestCase):
                     folder.mkdir()
                     c[split+'_'+kind] = str(folder)
                 pixels = np.arange(np.prod(hw), dtype=np.uint8).reshape(hw)
-                Image.fromarray(pixels).save(Path(c[split+'_y'])/'scene.png')
+                Image.fromarray(pixels).save(Path(c[split+'_y'])/('scene.tif' if split == 'train' else 'scene.png'))
                 tifffile.imwrite(Path(c[split+'_depth'])/'scene.tif', np.ones(hw, np.float32))
             Path(c['real_dir']).mkdir()
             Image.fromarray(np.ones((57, 91), np.uint8)).save(Path(c['real_dir'])/'real.png')

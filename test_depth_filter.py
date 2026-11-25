@@ -14,7 +14,7 @@ from data import keep_training_frame, read_pair, train_depth_threshold
 from model import DepthModel
 from prepare_dataset import prepare
 from settings import SETTINGS
-from train import train
+from train import train, training_records
 
 
 class DepthFilterTests(unittest.TestCase):
@@ -30,12 +30,35 @@ class DepthFilterTests(unittest.TestCase):
                 c[split+'_'+suffix] = str(folder)
             for name in ('empty', 'mixed'):
                 image = np.full((28, 56), 0 if name == 'empty' else level, np.uint8)
-                Image.fromarray(image).save(Path(c[split+'_y'])/(name+'.png'))
+                suffix = '.TIF' if split == 'train' else '.png'
+                Image.fromarray(image).save(Path(c[split+'_y'])/(name+suffix))
                 z = np.full(image.shape, 10., np.float32)
                 if name == 'mixed':
                     z[0, :5] = [.1, .5, 2, 5, np.nan]
                 tifffile.imwrite(Path(c[split+'_depth'])/(name+'.tif'), z)
         return c
+
+    def test_train_only_pairs_tiffs_before_label_lookup_and_filters_cached_sources(self):
+        with TemporaryDirectory() as tmp:
+            c = self.fixture(Path(tmp))
+            folder = Path(c['train_y'])
+            (folder / 'mixed.png').write_bytes(b'ignored same-stem PNG')
+            (folder / 'preview.png').write_bytes(b'ignored unpaired PNG')
+            d = Path(c['train_depth'])
+            (d/'mixed.tif').rename(d/'mixed.TIFF')
+            raw, _ = training_records(c)
+            self.assertEqual({r['image'].name for r in raw}, {'mixed.TIF', 'empty.TIF'})
+            manifest = prepare(c)
+            self.assertEqual([Path(r['source']).name for r in manifest['train']], ['mixed.TIF'])
+            duplicate = dict(manifest['train'][0], source=str(folder/'mixed.png'), file='absent.npz')
+            manifest['train'].insert(0, duplicate)
+            (Path(c['prepared_dir'])/'manifest.json').write_text(json.dumps(manifest))
+            cached, _ = training_records(dict(c, training_input='prepared'))
+            self.assertEqual([Path(r['source']).name for r in cached], ['mixed.TIF'])
+            (folder/'mixed.TIF').unlink()
+            (folder/'empty.TIF').unlink()
+            with self.assertRaisesRegex(ValueError, 'tif'):
+                training_records(c)
 
     def test_mixed_frames_complete_raw_and_prepared_training(self):
         torch.set_num_threads(2)
@@ -91,13 +114,13 @@ class DepthFilterTests(unittest.TestCase):
                 z[4:24, 15:40] = region.reshape(20, 25)
                 tifffile.imwrite(Path(c['train_depth'])/(name+'.tif'), z)
                 if name == 'below':
-                    Image.fromarray(np.full(z.shape, 173, np.uint8)).save(Path(c['train_y'])/'below.png')
+                    Image.fromarray(np.full(z.shape, 173, np.uint8)).save(Path(c['train_y'])/'below.tiff')
             # A retained and a rejected test frame straddle the same threshold.
             # The rejected test measurement duplicates a retained training image.
             for name in ('mixed', 'below'):
                 (Path(c['val_depth'])/(name+'.tif')).write_bytes(
                     (Path(c['train_depth'])/(name+'.tif')).read_bytes())
-            (Path(c['val_y'])/'below.png').write_bytes((Path(c['train_y'])/'mixed.png').read_bytes())
+            (Path(c['val_y'])/'below.tiff').write_bytes((Path(c['train_y'])/'mixed.TIF').read_bytes())
             torch.save(DepthModel(c, load_pretrained=False).da.state_dict(), c['da_weights'])
             for audit in (True, False):
                 c['dataset_audit'] = audit
@@ -149,8 +172,9 @@ class DepthFilterTests(unittest.TestCase):
     def test_duplicate_valid_measurement_detected_with_audit_off(self):
         with TemporaryDirectory() as tmp:
             c = dict(self.fixture(Path(tmp)), dataset_audit=False)
-            original = Path(c['train_y'])/'mixed.png'
-            (Path(c['val_y'])/'mixed.png').write_bytes(original.read_bytes())
+            original = Path(c['train_y'])/'mixed.TIF'
+            (Path(c['val_y'])/'mixed.png').unlink()
+            (Path(c['val_y'])/'mixed.tiff').write_bytes(original.read_bytes())
             for mode in ('raw', 'prepared'):
                 c['training_input'] = mode
                 if mode == 'prepared':

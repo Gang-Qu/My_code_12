@@ -33,7 +33,7 @@ def digest(path):
 def prepare(c):
     threshold = train_depth_threshold(c)
     manifest = dict(min_train_depth_percent=threshold, rule=RULE, preprocessing=signature(c), train=[], skipped_train=[])
-    pairs = paired_files(c['train_y'], c['train_depth'])
+    pairs = paired_files(c['train_y'], c['train_depth'], training=True)
     root = Path(c['prepared_dir']).resolve()
     root.mkdir(parents=True, exist_ok=True)
     generation = Path(mkdtemp(prefix='frames-', dir=root))
@@ -41,7 +41,8 @@ def prepare(c):
         audit = {} if c.get('dataset_audit', True) else None
         y, z, valid, meta = read_pair(image, depth, c, training=True, audit=audit)
         if not keep_training_frame(meta, threshold):
-            manifest['skipped_train'].append(audit or dict(source=str(depth), **meta))
+            info = audit or dict(source=str(depth), **meta)
+            manifest['skipped_train'].append(dict(info, measurement_source=str(image.resolve())))
             continue
         coords = fixed_coords(y.shape, c['phase_mask_seed'], c['phase_grid_xy'])
         path = generation / f'frame_{i:06d}.npz'

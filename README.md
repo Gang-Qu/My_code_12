@@ -152,6 +152,8 @@ lr_mask=1e-3,
 
 ## 准备训练数据并运行
 
+训练测量目录 `train_y` 只选取扩展名为 `.tif` 或 `.tiff` 的文件，支持大写和混合大小写。每张测量图在 `train_depth` 中按同名主干配对一张深度 TIFF。例如，目录里同时有 `scene.png` 和 `scene.tif` 时，只使用 `scene.tif` 训练一次；单独的预览 PNG 可以留在原处。原图训练、缓存生成和训练集深度审查共用这条规则。读取已有 NPZ 缓存时按清单记录的原始测量文件后缀筛选。若旧缓存仅来自 PNG，请使用原图 TIFF 直接训练，或重新生成缓存。验证集和实拍仍支持 PNG。
+
 1. 安装适配设备的 PyTorch 和仓库依赖。在 `settings.py` 填写 `train_y`、`train_depth`、`val_y`、`val_depth`。同一场景的测量图与单通道深度 TIFF 使用同一文件名主干，二者须已配准。深度单位是米时用 `depth_scale=1`，毫米时用 `0.001`。
 2. 默认直接读原图。若希望复用磁盘缓存，可先运行 `python prepare_dataset.py`，再设 `training_input='prepared'`。缓存保存固定基础分组及坐标。使用可学习掩码时，训练从缓存还原裁剪测量，再应用当前掩码。两条入口沿用相同的灰度转换、米制单位和有效像素规则。
 3. 按所选 DA 类型填写对应的预训练权重路径，从仓库根目录运行 `python train.py`。训练入口默认逐项载入名称及形状均匹配的权重。每步使用同一幅图的全部子图；`batch_size` 控制单次 DA 前向的子图数，整帧回填后计算米制 L1 和可选的邻接梯度损失。显存紧张时可设 `batch_size=1`、`checkpoint_da_activations=True`，后者在反传时重算前向。模型选择及权重哈希见[官方权重来源](da_vendor/PROVENANCE.md)。

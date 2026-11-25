@@ -65,5 +65,5 @@ def write_audit(folder, c, splits):
 if __name__ == '__main__':
     from data import paired_files
     splits = {s: [audit_pair(image, label, SETTINGS, s == 'train') for image, label in
-                  paired_files(SETTINGS[s+'_y'], SETTINGS[s+'_depth'])] for s in ('train', 'val')}
+                  paired_files(SETTINGS[s+'_y'], SETTINGS[s+'_depth'], training=(s == 'train'))] for s in ('train', 'val')}
     write_audit(SETTINGS['output'], SETTINGS, splits)

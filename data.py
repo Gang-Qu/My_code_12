@@ -5,7 +5,8 @@ import torch
 from PIL import Image
 import tifffile
 
-EXT={'.png','.jpg','.jpeg','.tif','.tiff','.bmp'}
+TIFF_EXT = {'.tif', '.tiff'}
+EXT = TIFF_EXT | {'.png', '.jpg', '.jpeg', '.bmp'}
 def read_array(path):
     path=Path(path)
     if path.suffix.lower() in ('.tif','.tiff'):
@@ -88,22 +89,25 @@ def center_region(source_hw, resized_hw, c):
                         crop_origin_yx=[r, col], hw=[ch,cw])
 
 
-def paired_files(image_dir, depth_dir):
-    files = image_files(image_dir)
+def paired_files(image_dir, depth_dir, *, training=False):
+    files = image_files(image_dir, extensions=TIFF_EXT if training else EXT)
+    depths = {}
+    for path in Path(depth_dir).iterdir():
+        if path.suffix.lower() in TIFF_EXT and path.is_file():
+            depths.setdefault(path.stem, []).append(path)
     pairs = []
     for image in files:
-        matches = [Path(depth_dir) / (image.stem + ext) for ext in ('.tif', '.tiff')]
-        matches = [path for path in matches if path.is_file()]
+        matches = depths.get(image.stem, [])
         if len(matches) != 1:
             raise ValueError(f'{image}: expected exactly one matching depth TIFF in {depth_dir}')
         pairs.append((image, matches[0]))
     return pairs
 
 
-def image_files(folder):
-    files = sorted(p for p in Path(folder).iterdir() if p.is_file() and p.suffix.lower() in EXT)
+def image_files(folder, *, extensions=EXT):
+    files = sorted(p for p in Path(folder).iterdir() if p.is_file() and p.suffix.lower() in extensions)
     if not files:
-        raise ValueError(f'No measurement images in {folder}')
+        raise ValueError(f'No measurement images ({sorted(extensions)}) in {folder}')
     return files
 
 

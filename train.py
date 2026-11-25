@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from data import paired_files, read_pair, keep_training_frame, train_depth_threshold
+from data import TIFF_EXT, paired_files, read_pair, keep_training_frame, train_depth_threshold
 from evaluate import evaluate
 from depth_audit import audit_pair, write_audit
 from metrics import loss_terms, make_amp
@@ -43,7 +43,7 @@ def training_records(c):
     source = c.get('training_input', 'prepared')
     if source == 'raw':
         return [dict(image=image, depth=depth)
-                for image, depth in paired_files(c['train_y'], c['train_depth'])], []
+                for image, depth in paired_files(c['train_y'], c['train_depth'], training=True)], []
     if source != 'prepared':
         raise ValueError("training_input must be 'raw' or 'prepared'")
     prep = Path(c['prepared_dir'])
@@ -53,10 +53,26 @@ def training_records(c):
         saved.update(phase_grid_xy=[4, 2], center_crop_hw=None)
     if manifest['rule'] not in (LEGACY_RULE, RULE) or saved != signature(c):
         raise ValueError('Sampling or preprocessing changed. Run prepare_dataset.py again.')
-    skipped = manifest.get('skipped_train', [])
+    rows = [row for row in manifest['train'] if Path(row.get('source', '')).suffix.lower() in TIFF_EXT]
+    if manifest['train'] and not rows:
+        raise ValueError('缓存没有来自 TIFF 测量图的帧。请从训练 TIFF 运行 prepare_dataset.py，或使用 raw 模式。')
+    skipped = []
+    legacy_stems = None
+    for info in manifest.get('skipped_train', []):
+        if 'measurement_source' in info:
+            if Path(info['measurement_source']).suffix.lower() not in TIFF_EXT:
+                continue
+        elif Path(c['train_y']).is_dir():
+            # Older skipped rows store only the depth path, whose suffix cannot identify the input.
+            if legacy_stems is None:
+                legacy_stems = {p.stem for p in Path(c['train_y']).iterdir()
+                                if p.suffix.lower() in TIFF_EXT and p.is_file()}
+            if Path(info['source']).stem not in legacy_stems:
+                continue
+        skipped.append(info)
     if any(keep_training_frame(info, train_depth_threshold(c)) for info in skipped):
         raise ValueError('降低阈值后有先前未缓存的帧重新达标；请运行 python prepare_dataset.py 或使用 raw 模式。')
-    return manifest['train'], skipped
+    return rows, skipped
 
 
 def cached_frame_info(row, c, valid=None):

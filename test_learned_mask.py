@@ -82,7 +82,7 @@ class LearnableRoutingTest(unittest.TestCase):
                     path.mkdir()
                     c[split+'_'+suffix] = str(path)
                 y = (np.arange(65*85).reshape(65,85)*k % 255).astype('uint8')
-                Image.fromarray(y).save(Path(c[split+'_y'])/'image.png')
+                Image.fromarray(y).save(Path(c[split+'_y'])/('image.tif' if split == 'train' else 'image.png'))
                 tifffile.imwrite(Path(c[split+'_depth'])/'image.tif', (1+y/127.).astype('float32'))
             baseline = DepthModel(c, load_pretrained=False)
             torch.save(baseline.da.state_dict(), c['da_weights'])
