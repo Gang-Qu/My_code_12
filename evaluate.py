@@ -54,8 +54,11 @@ def evaluate(net, c, pairs, folder, device, epoch, skipped_frames=(), export_ima
 
 if __name__ == '__main__':
     from reconstruct_real import CHECKPOINT
-    net, config = load_checkpoint(CHECKPOINT, SETTINGS['device'])
+    folder = Path(SETTINGS['output']) / 'evaluation'
+    net, config = load_checkpoint(CHECKPOINT, SETTINGS['device'], strict=SETTINGS['strict_inference_weights'],
+                                  report_path=folder / 'weight_load.json')
+    config['strict_inference_weights'] = SETTINGS['strict_inference_weights']
     config['min_train_depth_percent'] = train_depth_threshold(SETTINGS)
     pairs = paired_files(SETTINGS['val_y'], SETTINGS['val_depth'])
-    evaluate(net, config, pairs, Path(SETTINGS['output']) / 'evaluation', SETTINGS['device'],
+    evaluate(net, config, pairs, folder, SETTINGS['device'],
              Path(CHECKPOINT).stem)

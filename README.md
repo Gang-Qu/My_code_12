@@ -1,6 +1,6 @@
 # My_code_12 · 在线采样与可学习掩码的 DA 米制深度重建
 
-输入一幅测量大图，输出同一坐标系的一幅米制深度图。主网络沿用 My_code_10 的 Depth Anything V2 metric 架构，包括 DINOv2 编码器、原有位置编码和 DPT 深度头。默认严格加载官方 Hypersim ViT-S 权重。坐标先验和整图整合默认均关闭，可以独立开启。
+输入一幅测量大图，输出同一坐标系的一幅米制深度图。主网络沿用 My_code_10 的 Depth Anything V2 metric 架构，包括 DINOv2 编码器、原有位置编码和 DPT 深度头。默认使用官方 Hypersim ViT-S 权重。坐标先验和整图整合默认均关闭，可以独立开启。
 
 ## 选择 metric 或 relative 预训练权重
 
@@ -11,7 +11,7 @@
 | `'metric'`（默认） | `da_weights='weights/depth_anything_v2_metric_hypersim_vits.pth'` | 官方室内头 `20 × sigmoid(logit)`，20 对应该权重的 `metric_max_depth` |
 | `'relative'` | `relative_da_weights='weights/depth_anything_v2_vits.pth'` | 官方 ReLU 头输出相对逆深度，再用从训练集拟合的标定层转换为米 |
 
-两类权重的一些参数名与形状完全相同，务必让权重来源、`encoder` 和模式相符。相对分支严格加载完整编码器及 DPT 头；`metric_max_depth` 仅作用于 metric 分支。[DA V2 官方相对模型与权重](https://github.com/DepthAnything/Depth-Anything-V2#pre-trained-models) · [官方米制模型](https://github.com/DepthAnything/Depth-Anything-V2/tree/main/metric_depth)
+两类权重的一些参数名与形状完全相同，务必让权重来源、`encoder` 和模式相符。相对分支可加载编码器及 DPT 头。`metric_max_depth` 仅作用于 metric 分支。[DA V2 官方相对模型与权重](https://github.com/DepthAnything/Depth-Anything-V2#pre-trained-models) · [官方米制模型](https://github.com/DepthAnything/Depth-Anything-V2/tree/main/metric_depth)
 
 相对模式使用所有子图共享的两个标量，将相对输出 `r` 映射为 `D = 1 / (softplus(softplus(g) × r + b) + 1e-6)` 米。这个初始化需要在自己的米制数据上标定。`freeze_da=True` 时仍可用 `lr_calibration` 训练这两个参数；`freeze_da=False` 时可与 DA 联合微调。测试与实拍从训练 checkpoint 恢复模型类型和标定参数。旧 checkpoint 自动使用 metric 路径。共享映射能否适应跨场景尺度变化，应在同一划分上比较两种初始化的测试分箱指标。[模型实现](model.py)
 
@@ -27,6 +27,8 @@ freeze_da=False,
 freeze_encoder=False,
 ```
 
+两份文件中都存在且形状匹配的张量按下表决定优先级。
+
 | 提供的文件 | `da_weight_priority` | 训练开始时的 DA 编码器和 DPT 深度头 | 其他已开启的模块 |
 |---|---|---|---|
 | 官方 DA 和整模型 checkpoint | `True`（默认） | 官方 DA 权重 | 从 checkpoint 恢复 |
@@ -34,9 +36,19 @@ freeze_encoder=False,
 | 仅官方 DA（`checkpoint=None`） | 任意 | 官方 DA 权重 | 按模型设计初始化 |
 | 仅整模型 checkpoint（当前模式对应的 DA 路径设为 `None`） | 任意 | 第一阶段 checkpoint 中的 DA 权重 | 从 checkpoint 恢复 |
 
-整模型按参数名和形状严格加载。请沿用第一阶段的 DA 类型、编码器、附加模块开关，以及 metric 模式的 `metric_max_depth`。可学习掩码还需沿用原来的网格、种子、tile 和规则版本。附加模块包括已启用的坐标投影、整图整合器、相对深度标定层和可学习掩码。若第一阶段微调过 DA，设为 `False` 可保留这部分训练结果。
+### 只加载匹配的权重
 
-每次训练从第 1 轮开始，使用当前学习率新建优化器。启动日志显示最终生效的 DA 文件，运行目录的 `weight_load.json` 记录加载顺序和绝对路径。独立测试和实拍直接读取选定的整模型 checkpoint，原始预训练文件可离线移走。[训练设置](settings.py) · [权重加载实现](model.py)
+训练默认使用 `strict_weight_load=False`。官方 DA 文件按 DA 模块内的参数名匹配，My_code_12 checkpoint 按整模型参数名匹配。**同名且形状一致的张量才会写入**。例如，若把单输出深度头改成三输出，仍可复用同形状的编码器和解码器参数。新末层的权重及偏置会保留当前初始化，可在微调时学习；请让需要学习的新层参与优化。
+
+同时提供两份文件时，`da_weight_priority` 对每个匹配张量分别生效。高优先级文件缺少某层或形状不同，该层沿用低优先级文件已经加载的值；两份都缺少则保留模型初始化。若所有文件合计匹配 0 项，训练会提示核对权重路径和模型。设为 `strict_weight_load=True` 可要求每份文件与其目标模块完整匹配。
+
+metric 和 relative 的输出含义不同。切换模式或更改 `metric_max_depth` 后，兼容模式仍会载入同名同形状的张量，需用当前米制真值重新验证。可学习掩码依赖特定的采样布局；已知规则版本、种子、网格或 tile 不一致时会跳过 `mask.*`，其余模块照常匹配。
+
+训练启动日志显示每个文件匹配和跳过的项数。运行目录的 `weight_load.json` 分别列出已加载、缺失、多余、形状不同和不兼容的参数，并在 `da_tensor_sources` 中记录每个 DA 张量最终来自哪个文件或模型初始化。新一轮训练从第 1 轮开始，使用当前学习率新建优化器。
+
+独立测试和实拍默认使用 `strict_inference_weights=True` 完整恢复所选 checkpoint。需要用架构有变化的代码运行旧 checkpoint 时，在 `settings.py` 设置 `strict_inference_weights=False`，程序按 checkpoint 配置构造模型，加载匹配张量，并在输出目录写入 `weight_load.json`。跳过的层使用初始化值，测试精度可能受到影响。[训练设置](settings.py) · [权重加载实现](model.py)
+
+CPU 验证使用随机初始化的 metric ViT-S，将权重文件中输出卷积核的形状从 `[1,32,1,1]` 改为 `[3,32,1,1]`。训练入口加载了其余 238 个张量，报告中列出了跳过的卷积核，随后完成了前向和反向传播。该验证针对加载行为，未测量目标数据集精度。
 
 ## 按深度范围筛选训练与测试图像
 
@@ -96,7 +108,7 @@ freeze_encoder=False,
 
 **灰度扩展本身能省多少。** 当前 `expand` 给同一灰度图创建三通道视图，随后按各通道均值和标准差归一化，形成三通道输入。每张子图只经过一次编码器。若只想省掉三通道归一化和首层卷积，可以将归一化折入 DA 的 14×14 patch 投影。对于 RGB 卷积权重 `W`、偏置 `b`、通道均值 `μ` 和标准差 `σ`，单通道等效核为 `W灰 = Σc Wc/σc`，偏置为 `b灰 = b − Σc,u,v Wc,u,v × μc/σc`。相同权重下可保持前向等价，后续 Transformer 和 DPT 仍逐图计算。若把折叠结果改为独立可训练参数，优化器的更新轨迹会改变。这是可选优化思路，当前训练入口使用原始预训练参数形状。[灰度归一化](data.py) · [patch 投影](da_vendor/depth_anything_v2/dinov2_layers/patch_embed.py)
 
-**三张占用 RGB 通道的精度风险。** 当前互补掩码让三张子图同一行列的值来自原图同一采样单元内的三个位置。平坦表面上三处深度可能接近，物体边缘或细杆处则可能明显不同。DA 预训练的 RGB 通道描述同一位置的颜色，第一层就混合三通道，现有 DPT 末层也只输出一个深度。只更换输入时每组三张仍只得到一张深度图。如果将它复制三份回填，三个不同位置会得到同一预测。若探索共享编码，可先在固定掩码、固定子图编号下，把原单输出头的末层权重分别复制给三个输出作初始化，再让每路预测按各自坐标回填、分别接受真值监督；尾组填充的两路排除在回填和损失之外。开启坐标先验时，相应投影也要能表示三组坐标。官方末层与三输出末层的形状不同，需要显式转换权重。复制初始化只能作为微调起点。[当前 DPT 输出头](da_vendor/depth_anything_v2/dpt.py) · [DA V2 官方模型](https://github.com/DepthAnything/Depth-Anything-V2)
+**三张占用 RGB 通道的精度风险。** 当前互补掩码让三张子图同一行列的值来自原图同一采样单元内的三个位置。平坦表面上三处深度可能接近，物体边缘或细杆处则可能明显不同。DA 预训练的 RGB 通道描述同一位置的颜色，第一层就混合三通道，现有 DPT 末层也只输出一个深度。只更换输入时每组三张仍只得到一张深度图。如果将它复制三份回填，三个不同位置会得到同一预测。若探索共享编码，可先在固定掩码、固定子图编号下，把原单输出头的末层权重分别复制给三个输出作初始化，再让每路预测按各自坐标回填、分别接受真值监督；尾组填充的两路排除在回填和损失之外。开启坐标先验时，相应投影也要能表示三组坐标。官方末层与三输出末层的形状不同，默认会跳过这层；若要复制初始化，可显式转换其权重。复制初始化只能作为微调起点。[当前 DPT 输出头](da_vendor/depth_anything_v2/dpt.py) · [DA V2 官方模型](https://github.com/DepthAnything/Depth-Anything-V2)
 
 **尺寸与验证。** 本仓库的子图数由 `phase_grid_xy=[横,纵]` 决定。若实际送入采样的是完整 3000×5000，网格 `[10,6]` 得到 60 张 500×500，DA 会补齐到 504×504；`[10,7]` 得到 70 张 429×500。518 并非这里的固定切块尺寸。改变网格也会改变子图的空间上下文，因此比较三张并行和通道打包时应固定网格、种子及裁剪尺寸。[采样实现](sampling.py)
 
@@ -142,7 +154,7 @@ lr_mask=1e-3,
 
 1. 安装适配设备的 PyTorch 和仓库依赖。在 `settings.py` 填写 `train_y`、`train_depth`、`val_y`、`val_depth`。同一场景的测量图与单通道深度 TIFF 使用同一文件名主干，二者须已配准。深度单位是米时用 `depth_scale=1`，毫米时用 `0.001`。
 2. 默认直接读原图。若希望复用磁盘缓存，可先运行 `python prepare_dataset.py`，再设 `training_input='prepared'`。缓存保存固定基础分组及坐标。使用可学习掩码时，训练从缓存还原裁剪测量，再应用当前掩码。两条入口沿用相同的灰度转换、米制单位和有效像素规则。
-3. 按所选 DA 类型填写对应的预训练权重路径，从仓库根目录运行 `python train.py`。训练入口要求权重参数名和形状完全匹配。每步使用同一幅图的全部子图；`batch_size` 控制单次 DA 前向的子图数，整帧回填后计算米制 L1 和可选的邻接梯度损失。显存紧张时可设 `batch_size=1`、`checkpoint_da_activations=True`，后者在反传时重算前向。模型选择及权重哈希见[官方权重来源](da_vendor/PROVENANCE.md)。
+3. 按所选 DA 类型填写对应的预训练权重路径，从仓库根目录运行 `python train.py`。训练入口默认逐项载入名称及形状均匹配的权重。每步使用同一幅图的全部子图；`batch_size` 控制单次 DA 前向的子图数，整帧回填后计算米制 L1 和可选的邻接梯度损失。显存紧张时可设 `batch_size=1`、`checkpoint_da_activations=True`，后者在反传时重算前向。模型选择及权重哈希见[官方权重来源](da_vendor/PROVENANCE.md)。
 4. 每轮直接从 `val_y`、`val_depth` 读取测试大图，对测量与配准深度作相同中心裁剪，在裁剪网格采样、重建和回填。实拍时在 `reconstruct_real.py` 填训练产生的 `CHECKPOINT`，在 `settings.py` 填 `real_dir`，运行 `python reconstruct_real.py` 即可。独立测试入口是 `python evaluate.py`，共用同一 `CHECKPOINT`。实拍和测试从权重恢复模型开关、掩码版本和种子，默认逐张子图前向。每轮实拍可设 `real_each_epoch=True`。
 
 ## 可选：预生成固定基础分组并检查子图

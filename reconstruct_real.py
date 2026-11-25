@@ -1,11 +1,12 @@
 """Run fixed-mask reconstruction on native-sized real measurements."""
 from datetime import datetime
+import json
 from pathlib import Path
 
 import torch
 
 from data import image_files, measurement, resize_measurement, center_region
-from model import DepthModel
+from model import DepthModel, load_matching_tensors
 from outputs import save_result
 from sampling import RULE, LEGACY_RULE, LEARNED_RULE
 from settings import SETTINGS
@@ -50,17 +51,31 @@ def run_real(net, c, folder, device):
         save_result(folder, f'{i:04d}_{image.stem}', y, z, geometry(y, c, meta), c)
 
 
-def load_checkpoint(path, device):
+def load_checkpoint(path, device, *, strict=True, report_path=None):
+    if type(strict) is not bool:
+        raise ValueError('strict_inference_weights must be True or False')
     ck = torch.load(path, map_location='cpu', weights_only=True)
     if ck['rule'] != sampling_rule(ck['config']):
         raise ValueError('Incompatible sampling rule')
-    net = DepthModel(ck['config'], load_pretrained=False)
-    net.load_state_dict(ck['model'], strict=True)
+    with torch.random.fork_rng(devices=[]):
+        torch.random.default_generator.manual_seed(ck['config'].get('seed', 41))
+        net = DepthModel(ck['config'], load_pretrained=False)
+    report = load_matching_tensors(net, ck['model'], strict=strict)
+    if not report['loaded']:
+        raise ValueError(f'{path}: 没有匹配当前模型的权重张量')
+    report.update(source=str(Path(path).resolve()), strict_inference_weights=strict)
+    net.weight_load = report
+    if not strict:
+        print(f"推理权重：从 {path} 匹配 {len(report['loaded'])}/{len(net.state_dict())} 个张量", flush=True)
+    if report_path is not None:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf8')
     return net.to(device).eval(), dict(ck['config'])
 
 
 if __name__ == '__main__':
-    net, config = load_checkpoint(CHECKPOINT, SETTINGS['device'])
-    config.update(real_dir=SETTINGS['real_dir'], inference_batch_size=SETTINGS['inference_batch_size'])
     folder = Path(SETTINGS['output']) / 'real' / datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    net, config = load_checkpoint(CHECKPOINT, SETTINGS['device'], strict=SETTINGS['strict_inference_weights'],
+                                  report_path=folder / 'weight_load.json')
+    config.update(real_dir=SETTINGS['real_dir'], inference_batch_size=SETTINGS['inference_batch_size'])
     run_real(net, config, folder, SETTINGS['device'])

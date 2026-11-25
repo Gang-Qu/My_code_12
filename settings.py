@@ -22,6 +22,8 @@ SETTINGS = dict(
     da_weights='weights/depth_anything_v2_metric_hypersim_vits.pth',
     checkpoint=None,  # optional My_code_12 training checkpoint (.pt)
     da_weight_priority=True,  # with both files, official DA overrides checkpoint DA
+    strict_weight_load=False,  # training: copy tensors with matching names and shapes
+    strict_inference_weights=True,  # standalone evaluation/real: set False to allow partial replay
     use_coordinate_prior=False, use_refiner=False,
     freeze_encoder=False, freeze_da=False, attention_backend='sdpa',
     device='cuda', batch_size=2, inference_batch_size=1, epochs=20,

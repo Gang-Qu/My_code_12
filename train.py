@@ -175,8 +175,11 @@ def train(c):
     net = DepthModel(c).to(device)
     report = net.weight_load
     (run / 'weight_load.json').write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf8')
-    winner = report['final_da_source']
-    print(f"DA 初始化权重来自 {winner} = {report['sources'][winner]}", flush=True)
+    for key, detail in report['details'].items():
+        print(f"加载 {key}: 匹配 {len(detail['loaded'])}，缺少 {len(detail['missing'])}，"
+              f"额外 {len(detail['unexpected'])}，形状不同 {len(detail['shape_mismatch'])}，"
+              f"不兼容 {len(detail['incompatible'])}。{report['sources'][key]}", flush=True)
+    print(f"DA 初始化来源：{report['final_da_source']}，逐项来源见 weight_load.json", flush=True)
     opt = optimizer_for(net, c)
     amp, dtype, scaler = make_amp(c, device)
     for epoch in range(1, c['epochs'] + 1):

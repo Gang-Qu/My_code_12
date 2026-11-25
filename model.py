@@ -26,39 +26,84 @@ SPECS = {'vits': (64, [48, 96, 192, 384]), 'vitb': (128, [96, 192, 384, 768]),
          'vitl': (256, [256, 512, 1024, 1024])}
 
 
+def load_matching_tensors(module, state, strict, skip_prefixes=()):
+    """Compare against this module's namespace before copying any tensors."""
+    if not isinstance(state, dict):
+        raise ValueError('Expected a state_dict mapping parameter names to tensors')
+    target = module.state_dict()
+    matched = {}
+    mismatches = {}
+    incompatible = []
+    for name in sorted(target.keys() & state.keys()):
+        value = state[name]
+        if name.startswith(skip_prefixes) or not torch.is_tensor(value):
+            incompatible.append(name)
+        elif value.shape != target[name].shape:
+            mismatches[name] = dict(source=list(value.shape), target=list(target[name].shape))
+        else:
+            matched[name] = value
+    module.load_state_dict(state if strict else matched, strict=strict)
+    return dict(loaded=sorted(matched), missing=sorted(target.keys() - state.keys()),
+                unexpected=sorted(state.keys() - target.keys()), shape_mismatch=mismatches,
+                incompatible=sorted(incompatible))
+
+
 def load_training_weights(net, c):
     """Initialize all model weights before optimizer creation and record DA precedence."""
     priority = c.get('da_weight_priority', True)
     if type(priority) is not bool:
         raise ValueError('da_weight_priority must be True or False')
+    strict = c.get('strict_weight_load', False)
+    if type(strict) is not bool:
+        raise ValueError('strict_weight_load must be True or False')
     mode = c.get('da_model_type', 'metric')
     da_key = 'relative_da_weights' if mode == 'relative' else 'da_weights'
     order = ('checkpoint', da_key) if priority else (da_key, 'checkpoint')
     sources = {key: str(Path(c[key]).expanduser().resolve()) for key in order if c.get(key)}
     if not sources:
         raise ValueError(f'Set {da_key} or checkpoint in settings.py')
+    details = {}
+    da_sources = dict.fromkeys(net.da.state_dict(), 'initialization')
     for key, path in sources.items():
         if not Path(path).is_file():
             raise FileNotFoundError(f'{key}: {path}')
         state = torch.load(path, map_location='cpu', weights_only=True)
+        if not isinstance(state, dict):
+            raise ValueError(f'{key}: expected a weight or checkpoint dictionary in {path}')
         if key == 'checkpoint':
-            if not isinstance(state, dict) or not {'model', 'config'} <= state.keys():
+            if not {'model', 'config'} <= state.keys():
                 raise ValueError('checkpoint must be a My_code_12 training file containing model and config')
             saved = state['config']
+            differences = []
             if saved.get('da_model_type', 'metric') != mode:
-                raise ValueError('checkpoint da_model_type differs from settings.py')
-            if mode == 'metric' and saved['metric_max_depth'] != c['metric_max_depth']:
-                raise ValueError('checkpoint metric_max_depth differs from settings.py')
-            if c['phase_mask_mode'] == 'learned':
-                if state.get('rule') != LEARNED_RULE or any(
+                differences.append('da_model_type')
+            if mode == 'metric' and saved.get('metric_max_depth') != c['metric_max_depth']:
+                differences.append('metric_max_depth')
+            skip_prefixes = ()
+            if c['phase_mask_mode'] == 'learned' and (
+                state.get('rule') != LEARNED_RULE or any(
                     saved.get(k) != c[k] for k in ('phase_mask_seed', 'phase_grid_xy', 'mask_tile_hw')
-                ):
-                    raise ValueError('checkpoint learned sampling rule, seed, grid and tile must match settings.py')
-            net.load_state_dict(state['model'], strict=True)
+                )
+            ):
+                differences.append('learned sampling layout')
+                skip_prefixes = ('mask.',)
+            if strict and differences:
+                raise ValueError(f"checkpoint differs from settings.py: {', '.join(differences)}")
+            detail = load_matching_tensors(net, state['model'], strict, skip_prefixes)
+            detail['config_differences'] = differences
+            da_names = (name[3:] for name in detail['loaded'] if name.startswith('da.'))
         else:
-            net.da.load_state_dict(state.get('state_dict', state), strict=True)
+            detail = load_matching_tensors(net.da, state.get('state_dict', state), strict)
+            da_names = detail['loaded']
+        da_sources.update(dict.fromkeys(da_names, key))
+        details[key] = detail
         del state
-    return dict(da_weight_priority=priority, sources=sources, final_da_source=next(reversed(sources)))
+    if not any(detail['loaded'] for detail in details.values()):
+        raise ValueError(f'没有匹配当前模型的权重张量，请核对参数名称、形状与权重路径：{sources}')
+    owners = set(da_sources.values())
+    return dict(da_weight_priority=priority, strict_weight_load=strict, sources=sources,
+                details=details, da_tensor_sources=da_sources,
+                final_da_source=next(iter(owners)) if len(owners) == 1 else 'mixed')
 
 
 class InverseDepthCalibration(nn.Module):
