@@ -23,7 +23,7 @@ class MaskEvaluationTests(unittest.TestCase):
             tifffile.imwrite(root / 'gt.tif', gt)
             Image.fromarray(codes).save(root / 'pred.png')
             args = (masks, root / 'gt.tif', root / 'pred.png', root / 'out')
-            with self.assertRaisesRegex(ValueError, 'pred-scale'):
+            with self.assertRaisesRegex(ValueError, 'pred_scale'):
                 evaluate_masks(*args)
             evaluate_masks(*args, pred_scale=.001)
             report = json.loads((root/'out/metrics.json').read_text())
@@ -50,5 +50,6 @@ class MaskEvaluationTests(unittest.TestCase):
             np.savez(path, geometry_json=json.dumps(geo))
             result = align_gt(raw, (2, 4), path)
             np.testing.assert_array_equal(result, [[8, 8, 9, 9], [8, 8, 9, 9]])
-            with self.assertRaisesRegex(ValueError, 'geometry-npz'):
-                align_gt(raw, (2, 4), None)
+            direct = align_gt(raw, (2, 4), None)
+            np.testing.assert_array_equal(direct, [[6, 8, 9, 11], [18, 20, 21, 23]])
+            self.assertEqual(direct.dtype, raw.dtype)
