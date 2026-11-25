@@ -20,10 +20,45 @@ from torch.utils.checkpoint import checkpoint
 from torch.nn import functional as F
 
 from data import model_input
-from sampling import LearnedMask, fixed_coords, restore
+from sampling import LEARNED_RULE, LearnedMask, fixed_coords, restore
 
 SPECS = {'vits': (64, [48, 96, 192, 384]), 'vitb': (128, [96, 192, 384, 768]),
          'vitl': (256, [256, 512, 1024, 1024])}
+
+
+def load_training_weights(net, c):
+    """Initialize all model weights before optimizer creation and record DA precedence."""
+    priority = c.get('da_weight_priority', True)
+    if type(priority) is not bool:
+        raise ValueError('da_weight_priority must be True or False')
+    mode = c.get('da_model_type', 'metric')
+    da_key = 'relative_da_weights' if mode == 'relative' else 'da_weights'
+    order = ('checkpoint', da_key) if priority else (da_key, 'checkpoint')
+    sources = {key: str(Path(c[key]).expanduser().resolve()) for key in order if c.get(key)}
+    if not sources:
+        raise ValueError(f'Set {da_key} or checkpoint in settings.py')
+    for key, path in sources.items():
+        if not Path(path).is_file():
+            raise FileNotFoundError(f'{key}: {path}')
+        state = torch.load(path, map_location='cpu', weights_only=True)
+        if key == 'checkpoint':
+            if not isinstance(state, dict) or not {'model', 'config'} <= state.keys():
+                raise ValueError('checkpoint must be a My_code_12 training file containing model and config')
+            saved = state['config']
+            if saved.get('da_model_type', 'metric') != mode:
+                raise ValueError('checkpoint da_model_type differs from settings.py')
+            if mode == 'metric' and saved['metric_max_depth'] != c['metric_max_depth']:
+                raise ValueError('checkpoint metric_max_depth differs from settings.py')
+            if c['phase_mask_mode'] == 'learned':
+                if state.get('rule') != LEARNED_RULE or any(
+                    saved.get(k) != c[k] for k in ('phase_mask_seed', 'phase_grid_xy', 'mask_tile_hw')
+                ):
+                    raise ValueError('checkpoint learned sampling rule, seed, grid and tile must match settings.py')
+            net.load_state_dict(state['model'], strict=True)
+        else:
+            net.da.load_state_dict(state.get('state_dict', state), strict=True)
+        del state
+    return dict(da_weight_priority=priority, sources=sources, final_da_source=next(reversed(sources)))
 
 
 class InverseDepthCalibration(nn.Module):
@@ -52,10 +87,6 @@ class DepthModel(nn.Module):
                                   out_channels=channels, max_depth=maximum)
         self.calibration = InverseDepthCalibration() if model_type == 'relative' else None
         configure_attention(self.da, c['attention_backend'])
-        if load_pretrained:
-            weights = c['relative_da_weights'] if model_type == 'relative' else c['da_weights']
-            state = torch.load(weights, map_location='cpu', weights_only=True)
-            self.da.load_state_dict(state.get('state_dict', state), strict=True)
         self.checkpoint_activations = c.get('checkpoint_da_activations', False)
         self.grid_xy = tuple(c.get('phase_grid_xy', (4, 2)))
         self.register_buffer('_base_grid', None, persistent=False)
@@ -76,6 +107,8 @@ class DepthModel(nn.Module):
         self.refiner = FrameRefiner('measurement') if c['use_refiner'] else None
         self.da.requires_grad_(not c['freeze_da'])
         self.da.pretrained.requires_grad_(not (c['freeze_encoder'] or c['freeze_da']))
+
+        self.weight_load = load_training_weights(self, c) if load_pretrained else None
 
     def predict_parts(self, parts, coords, hw):
         h, w = parts.shape[-2:]

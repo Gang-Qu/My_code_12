@@ -73,6 +73,9 @@ class PipelineTest(unittest.TestCase):
             # Synthetic compatible state exercises strict loading without downloading test weights.
             torch.save(DepthModel(c, load_pretrained=False).da.state_dict(), c['da_weights'])
             run = train(c)
+            report = json.loads((run / 'weight_load.json').read_text())
+            self.assertEqual(report['final_da_source'], 'da_weights')
+            Path(c['da_weights']).unlink()
             net, config = load_checkpoint(run/'checkpoints/epoch_001.pt', 'cpu')
             test_dir = run/'test/epoch001'
             with np.load(test_dir/'0000_scene.npz') as result:

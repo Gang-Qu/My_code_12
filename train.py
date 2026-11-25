@@ -173,6 +173,10 @@ def train(c):
     torch.manual_seed(c['seed'])
     device = torch.device(c['device'])
     net = DepthModel(c).to(device)
+    report = net.weight_load
+    (run / 'weight_load.json').write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf8')
+    winner = report['final_da_source']
+    print(f"DA 初始化权重来自 {winner} = {report['sources'][winner]}", flush=True)
     opt = optimizer_for(net, c)
     amp, dtype, scaler = make_amp(c, device)
     for epoch in range(1, c['epochs'] + 1):

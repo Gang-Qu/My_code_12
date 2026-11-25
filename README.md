@@ -15,6 +15,29 @@
 
 相对模式使用所有子图共享的两个标量，将相对输出 `r` 映射为 `D = 1 / (softplus(softplus(g) × r + b) + 1e-6)` 米。这个初始化需要在自己的米制数据上标定。`freeze_da=True` 时仍可用 `lr_calibration` 训练这两个参数；`freeze_da=False` 时可与 DA 联合微调。测试与实拍从训练 checkpoint 恢复模型类型和标定参数。旧 checkpoint 自动使用 metric 路径。共享映射能否适应跨场景尺度变化，应在同一划分上比较两种初始化的测试分箱指标。[模型实现](model.py)
 
+### 训练时设置 DA 权重优先级
+
+将官方预训练文件放在训练机上，在 `settings.py` 填写上述模式对应的路径。从仓库根目录运行 `python train.py`。首次训练保留 `checkpoint=None`。若已训练过融合模块，要继续联合优化，可按下例载入第一阶段的整模型文件。
+
+```python
+# settings.py 的 SETTINGS 条目。把路径换成实际的第一阶段文件。
+checkpoint='output/第一阶段运行目录/checkpoints/epoch_020.pt',
+da_weight_priority=False,
+freeze_da=False,
+freeze_encoder=False,
+```
+
+| 提供的文件 | `da_weight_priority` | 训练开始时的 DA 编码器和 DPT 深度头 | 其他已开启的模块 |
+|---|---|---|---|
+| 官方 DA 和整模型 checkpoint | `True`（默认） | 官方 DA 权重 | 从 checkpoint 恢复 |
+| 官方 DA 和整模型 checkpoint | `False` | 第一阶段 checkpoint 中的 DA 权重 | 从 checkpoint 恢复 |
+| 仅官方 DA（`checkpoint=None`） | 任意 | 官方 DA 权重 | 按模型设计初始化 |
+| 仅整模型 checkpoint（当前模式对应的 DA 路径设为 `None`） | 任意 | 第一阶段 checkpoint 中的 DA 权重 | 从 checkpoint 恢复 |
+
+整模型按参数名和形状严格加载。请沿用第一阶段的 DA 类型、编码器、附加模块开关，以及 metric 模式的 `metric_max_depth`。可学习掩码还需沿用原来的网格、种子、tile 和规则版本。附加模块包括已启用的坐标投影、整图整合器、相对深度标定层和可学习掩码。若第一阶段微调过 DA，设为 `False` 可保留这部分训练结果。
+
+每次训练从第 1 轮开始，使用当前学习率新建优化器。启动日志显示最终生效的 DA 文件，运行目录的 `weight_load.json` 记录加载顺序和绝对路径。独立测试和实拍直接读取选定的整模型 checkpoint，原始预训练文件可离线移走。[训练设置](settings.py) · [权重加载实现](model.py)
+
 ## 按深度范围筛选训练图像
 
 在 `settings.py` 设置 `min_train_depth_percent=80.0`（百分数，取值 0–100）。训练只保留**裁剪后至少 80% 像素的真值深度在配置范围内**、且至少含一个有效监督点的整帧。覆盖率在 resize、中心裁剪之后、子图采样之前计算：
