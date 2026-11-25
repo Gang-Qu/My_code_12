@@ -201,6 +201,24 @@ phase_grid_xy = [4, 2]
 
 开启先验时，每个采样点的真实行、列按该帧高宽分别归一化至 [−1,1]。一个核大小和步长均为 14 的可训练线性卷积将该 DA patch 内所有采样坐标投影到 token 维度，与图像 patch embedding 相加，再经过原有 DINOv2 位置编码和 Transformer。坐标投影零初始化，初始深度与同权重的 DA 基线一致。整合器是三层 3×3 卷积，末层零初始化，输出为粗深度加残差。可用 `freeze_da=True` 只训练已开启的附加模块；使用固定掩码且两个模块都关闭时须允许至少深度头训练。[模型实现](model.py)
 
+## 按多张 mask 评估一幅重建深度图
+
+从仓库根目录运行下面的命令，将四个路径换成自己的文件或目录。这个例子假设真值 TIFF 已经以米存储，重建 PNG 的 16 位整数以毫米存储。一张二值 mask 对应一个区域，mask 应与重建图覆盖同一视野，可以有不同的分辨率。[评估脚本](evaluate_masks.py)
+
+```bash
+python evaluate_masks.py \
+  --mask-dir "/data/scene01/masks" \
+  --gt-file "/data/gt/scene01.tiff" --gt-scale 1 \
+  --pred-file "/data/reconstruction/scene01.png" --pred-scale 0.001 \
+  --output "/data/results/scene01"
+```
+
+- **深度单位。** 重建深度（米）等于原始像素值乘 `--pred-scale` 再加 `--pred-offset`（默认 0）。16 位只说明存储精度。对于整数 PNG/TIFF，请按导出程序的实际编码填写比例。真值若也是毫米，设置 `--gt-scale 0.001`。本仓库的 `*_depth_m.tiff` 保存 float32 米值，读取它时可省略 `--pred-scale`。请选择单通道深度文件。
+- **对齐。** 脚本按重建图的实际高宽，用最近邻插值缩放每张 mask。灰度大于 0 或 RGB 任一通道大于 0 表示选中，透明像素忽略。推荐无损二值 PNG 或 TIFF。如果重建来自中心裁剪、真值仍是原始大图，可追加 `--geometry-npz "/data/reconstruction/同帧.npz"`，按仓库记录的 resize 和裁剪原点对齐真值。此时 mask 也应对应裁剪后的视野。
+- **逐像素误差。** 只评估 mask 内真值有限、为正且处于 `[--depth-min, --depth-max]` 的像素。上下限默认读取 `settings.py`。预测越界或为零仍计入误差。MAE、RMSE 的单位为米，3% 准确度为 `abs(预测−真值) ≤ 0.03 × 真值` 的有效像素比例，范围为 0–1。空区域的指标保存为 `null`。
+- **输出图像。** 每个 mask 有一个以原文件名命名的子目录，含缩放后的 `mask.png`、遮罩后的真值 `gt_masked.tiff`、重建 `prediction_masked.tiff` 和米制绝对误差图 `abs_error_m.tiff`。前两张深度图保留输入的数值编码，mask 外填 0；误差图在无效或未选中处填 NaN。
+- **汇总。** 在 `metrics.json` 的 `per_mask` 查看每张 mask 的指标和命中数。`mean_over_masks` 对各非空 mask 的指标等权求均值；`union_unique_pixels` 对所有 mask 的并集计算一次，每个有效像素只计一次；`pooled_with_repeats` 按每张 mask 的有效像素数加权，重叠像素按出现次数计入。
+
 ## 结果与验证范围
 
 训练预览保存回填后的整图。测试和实拍导出 PNG、米制 TIFF 及 NPZ。每轮测试目录有 `metrics.json` 和 `depth_bins.png`。按真值每 0.1 m 分箱，报告每箱有效像素比例和箱内 `abs(pred−gt)/gt ≤ 0.03` 的比例，总体指标按有效像素汇总。实验对照可固定数据、权重和种子，分别训练上表四种配置。
