@@ -35,6 +35,20 @@ class MaskEvaluationTests(unittest.TestCase):
             self.assertAlmostEqual(report['pooled_with_repeats']['accuracy_3pct'], 3/5)
             self.assertAlmostEqual(report['union_unique_pixels']['accuracy_3pct'], 2/3)
             folder = root/'out/left.png'
+            for name in ('gt_masked.png', 'prediction_masked.png', 'abs_error.png'):
+                with Image.open(folder/name) as preview:
+                    self.assertEqual(preview.mode, 'L')
+                    self.assertEqual(preview.size, (4, 1))
+                    values = np.asarray(preview)
+                    self.assertTrue((values[0, :2] > 0).all())
+                    self.assertTrue((values[0, 2:] == 0).all())
+            with Image.open(root/'out/all.png/gt_masked.png') as preview:
+                values = np.asarray(preview)
+                self.assertGreater(values[0, 2], values[0, 0])
+            with Image.open(root/'out/all.png/abs_error.png') as preview:
+                values = np.asarray(preview)
+                self.assertGreater(values[0, 1], values[0, 2])  # 31 mm versus zero error
+                self.assertEqual(values[0, 3], 0)  # invalid GT
             saved = tifffile.imread(folder/'prediction_masked.tiff')
             self.assertEqual(saved.dtype, codes.dtype)
             np.testing.assert_array_equal(saved, [[1030, 1031, 0, 0]])
