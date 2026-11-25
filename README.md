@@ -159,6 +159,14 @@ lr_mask=1e-3,
 3. 按所选 DA 类型填写对应的预训练权重路径，从仓库根目录运行 `python train.py`。训练入口默认逐项载入名称及形状均匹配的权重。每步使用同一幅图的全部子图；`batch_size` 控制单次 DA 前向的子图数，整帧回填后计算米制 L1 和可选的邻接梯度损失。显存紧张时可设 `batch_size=1`、`checkpoint_da_activations=True`，后者在反传时重算前向。模型选择及权重哈希见[官方权重来源](da_vendor/PROVENANCE.md)。
 4. 每轮直接从 `val_y`、`val_depth` 读取测试大图，对测量与配准深度作相同中心裁剪，在裁剪网格采样、重建和回填。实拍时在 `reconstruct_real.py` 填训练产生的 `CHECKPOINT`，在 `settings.py` 填 `real_dir`，运行 `python reconstruct_real.py` 即可。独立测试入口是 `python evaluate.py`，共用同一 `CHECKPOINT`。实拍和测试从权重恢复模型开关、掩码版本和种子，默认逐张子图前向。每轮实拍可设 `real_each_epoch=True`。
 
+### 8 位或 32 位输入配 16 位深度真值
+
+**可以直接训练。** 将 8 位或 32 位输入 TIFF 放在 `train_y`，将同名、已配准的单通道 16 位深度 TIFF 放在 `train_depth`。加载器把真值转换为 `float32`，再乘 `depth_scale` 得到米。网络输出米制浮点深度，在回填后的有效像素上计算 L1 和配置的相邻像素梯度损失。训练时保留浮点输出即可。[数据读取](data.py) · [损失计算](metrics.py)
+
+- **真值单位。** 若 16 位真值以毫米存储，在 `settings.py` 中设 `depth_scale=0.001`。例如存储值 2000 对应 2.000 m，预测 2.040 m 时该像素的绝对误差为 0.040 m。若文件按其他比例编码，填写实际的“米/存储单位”。带非零偏移的编码需先解码，目前标签读取只执行乘法。
+- **输入尺度。** 在默认 `black_level=0`、`white_level=None`、`gain=1`、线性编码下，`uint8` 输入除以 255，`float32` 输入除以 1，两者分别存储为 0–255 和 0–1 时可混用。如果 32 位输入保存的是实际米值、毫米值或 0–255 浮点值，应按它的编码换算到和其他输入一致的尺度。若 32 位是整数，默认白电平取该整数类型的最大值。显式配置的 `white_level` 会作用于所有输入；`depth_scale` 只作用于真值。[输入设置](settings.py)
+- **验证范围。** 已在 CPU 用同一幅合成测量图的 `uint8` 和等值 `float32` 两种存储方式，配同一张 `uint16` 毫米真值，分别完成 ViT-S 前向、loss 计算和反向传播，两次 loss 相同。这验证了读取和监督流程。实际精度仍取决于输入保留的深度细节和配准质量。
+
 ## 可选：预生成固定基础分组并检查子图
 
 在 `settings.py` 中，`expected_hw` 和 `center_crop_hw` 均按 **[高, 宽]** 填写，`phase_grid_xy=[a,b]` 按 **[横向数, 纵向数]** 填写。例如：
