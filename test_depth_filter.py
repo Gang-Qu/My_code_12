@@ -60,6 +60,24 @@ class DepthFilterTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'tif'):
                 training_records(c)
 
+    def test_configurable_training_and_label_formats(self):
+        with TemporaryDirectory() as tmp:
+            c = self.fixture(Path(tmp))
+            c.update(train_image_extensions='PNG', depth_extensions=['.PNG'])
+            folder = Path(c['train_y'])
+            Image.fromarray(np.ones((28, 56), np.uint8)).save(folder/'mixed.png')
+            Image.fromarray(np.ones((28, 56), np.uint16)).save(Path(c['train_depth'])/'mixed.png')
+            rows, _ = training_records(c)
+            self.assertEqual([(r['image'].name, r['depth'].name) for r in rows], [('mixed.png', 'mixed.png')])
+            prepare(c)
+            cached, _ = training_records(dict(c, training_input='prepared'))
+            self.assertEqual(Path(cached[0]['source']).name, 'mixed.png')
+            with self.assertRaisesRegex(ValueError, '未缓存'):
+                training_records(dict(c, training_input='prepared',
+                                      train_image_extensions=['png', 'tif'], depth_extensions=['tif']))
+            with self.assertRaisesRegex(ValueError, 'train_image_extensions'):
+                training_records(dict(c, train_image_extensions=['.invalid']))
+
     def test_mixed_frames_complete_raw_and_prepared_training(self):
         torch.set_num_threads(2)
         with TemporaryDirectory() as tmp:

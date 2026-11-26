@@ -152,7 +152,16 @@ lr_mask=1e-3,
 
 ## 准备训练数据并运行
 
-训练测量目录 `train_y` 只选取扩展名为 `.tif` 或 `.tiff` 的文件，支持大写和混合大小写。每张测量图在 `train_depth` 中按同名主干配对一张深度 TIFF。例如，目录里同时有 `scene.png` 和 `scene.tif` 时，只使用 `scene.tif` 训练一次；单独的预览 PNG 可以留在原处。原图训练、缓存生成和训练集深度审查共用这条规则。读取已有 NPZ 缓存时按清单记录的原始测量文件后缀筛选。若旧缓存仅来自 PNG，请使用原图 TIFF 直接训练，或重新生成缓存。验证集和实拍仍支持 PNG。
+在 `settings.py` 的 `SETTINGS` 中选择要读入的文件扩展名。配置可以是一个字符串或多个后缀组成的列表，支持大小写和省略前导点。例如，训练只用 PNG 时设 `train_image_extensions=['.png']`；同时使用 TIFF 和 PNG 时设为 `['.tif', '.tiff', '.png']`。每个匹配的测量文件各算一张样本，同名的 PNG 和 TIFF 若都被选中会分别参与训练。
+
+| 配置项 | 作用 | 默认 |
+|---|---|---|
+| `train_image_extensions` | 训练测量图、训练审查和预处理 | `.tif`、`.tiff` |
+| `val_image_extensions` | 每轮测试、独立测试及测试集审查的测量图 | TIFF、PNG、JPEG、BMP |
+| `real_image_extensions` | 每轮和独立实拍重建的测量图 | TIFF、PNG、JPEG、BMP |
+| `depth_extensions` | 训练与测试的单通道深度标签 | `.tif`、`.tiff` |
+
+每张测量图按文件名主干配对唯一的深度标签。例如，同目录有 `scene.tif` 和 `scene.png` 两种标签时，可通过 `depth_extensions` 选用实际存储深度值的格式。`depth_scale` 仍按标签的实际单位设置。原图模式改完配置即可运行。缓存模式按清单中的来源筛选；如果要纳入之前没有缓存的文件，请用新设置运行 `prepare_dataset.py`，或使用 `training_input='raw'`。独立测试和实拍使用当前 `settings.py` 选择输入文件。
 
 1. 安装适配设备的 PyTorch 和仓库依赖。在 `settings.py` 填写 `train_y`、`train_depth`、`val_y`、`val_depth`。同一场景的测量图与单通道深度 TIFF 使用同一文件名主干，二者须已配准。深度单位是米时用 `depth_scale=1`，毫米时用 `0.001`。
 2. 默认直接读原图。若希望复用磁盘缓存，可先运行 `python prepare_dataset.py`，再设 `training_input='prepared'`。缓存保存固定基础分组及坐标。使用可学习掩码时，训练从缓存还原裁剪测量，再应用当前掩码。两条入口沿用相同的灰度转换、米制单位和有效像素规则。

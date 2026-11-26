@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from data import TIFF_EXT, paired_files, read_pair, keep_training_frame, train_depth_threshold
+from data import TIFF_EXT, configured_extensions, paired_files, read_pair, keep_training_frame, train_depth_threshold
 from evaluate import evaluate
 from depth_audit import audit_pair, write_audit
 from metrics import loss_terms, make_amp
@@ -43,7 +43,7 @@ def training_records(c):
     source = c.get('training_input', 'prepared')
     if source == 'raw':
         return [dict(image=image, depth=depth)
-                for image, depth in paired_files(c['train_y'], c['train_depth'], training=True)], []
+                for image, depth in paired_files(c['train_y'], c['train_depth'], training=True, config=c)], []
     if source != 'prepared':
         raise ValueError("training_input must be 'raw' or 'prepared'")
     prep = Path(c['prepared_dir'])
@@ -53,20 +53,42 @@ def training_records(c):
         saved.update(phase_grid_xy=[4, 2], center_crop_hw=None)
     if manifest['rule'] not in (LEGACY_RULE, RULE) or saved != signature(c):
         raise ValueError('Sampling or preprocessing changed. Run prepare_dataset.py again.')
-    rows = [row for row in manifest['train'] if Path(row.get('source', '')).suffix.lower() in TIFF_EXT]
+    extensions = configured_extensions(c, 'train_image_extensions')
+    depth_extensions = configured_extensions(c, 'depth_extensions')
+    rows = []
+    for row in manifest['train']:
+        if Path(row.get('source', '')).suffix.lower() not in extensions:
+            continue
+        depth_path = row.get('depth_source') or row.get('depth_audit', {}).get('source')
+        if depth_path:
+            if Path(depth_path).suffix.lower() not in depth_extensions:
+                continue
+        elif not TIFF_EXT <= depth_extensions:
+            raise ValueError('旧缓存未记录标签后缀；请按当前 depth_extensions 重新预处理或使用 raw 模式。')
+        rows.append(row)
+    formats = manifest.get('input_formats')
+    if formats and Path(c['train_y']).is_dir() and Path(c['train_depth']).is_dir():
+        previous_images = set(formats['train_image_extensions'])
+        previous_depths = set(formats['depth_extensions'])
+        if extensions - previous_images or depth_extensions - previous_depths:
+            for image, depth in paired_files(c['train_y'], c['train_depth'], training=True, config=c):
+                if image.suffix.lower() not in previous_images or depth.suffix.lower() not in previous_depths:
+                    raise ValueError(f'当前设置选中了未缓存的格式：{image.name}, {depth.name}；请重新预处理或使用 raw 模式。')
     if manifest['train'] and not rows:
-        raise ValueError('缓存没有来自 TIFF 测量图的帧。请从训练 TIFF 运行 prepare_dataset.py，或使用 raw 模式。')
+        raise ValueError(f'缓存中没有匹配的测量图 {sorted(extensions)} 和标签 {sorted(depth_extensions)}；请重新预处理或使用 raw 模式。')
     skipped = []
     legacy_stems = None
     for info in manifest.get('skipped_train', []):
+        if Path(info['source']).suffix.lower() not in depth_extensions:
+            continue
         if 'measurement_source' in info:
-            if Path(info['measurement_source']).suffix.lower() not in TIFF_EXT:
+            if Path(info['measurement_source']).suffix.lower() not in extensions:
                 continue
         elif Path(c['train_y']).is_dir():
             # Older skipped rows store only the depth path, whose suffix cannot identify the input.
             if legacy_stems is None:
                 legacy_stems = {p.stem for p in Path(c['train_y']).iterdir()
-                                if p.suffix.lower() in TIFF_EXT and p.is_file()}
+                                if p.suffix.lower() in extensions and p.is_file()}
             if Path(info['source']).stem not in legacy_stems:
                 continue
         skipped.append(info)
@@ -170,7 +192,7 @@ def train(c):
     rows, skipped_at_prepare = training_records(c)
     raw_input = c.get('training_input', 'prepared') == 'raw'
     sample_online = raw_input or c['phase_mask_mode'] == 'learned'
-    pairs = paired_files(c['val_y'], c['val_depth'])
+    pairs = paired_files(c['val_y'], c['val_depth'], config=c)
     run = Path(c['output']) / datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     (run / 'checkpoints').mkdir(parents=True)
     audit_enabled = c.get('dataset_audit', True)

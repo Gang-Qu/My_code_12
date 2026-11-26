@@ -59,6 +59,7 @@ if __name__ == '__main__':
                                   report_path=folder / 'weight_load.json')
     config['strict_inference_weights'] = SETTINGS['strict_inference_weights']
     config['min_train_depth_percent'] = train_depth_threshold(SETTINGS)
-    pairs = paired_files(SETTINGS['val_y'], SETTINGS['val_depth'])
+    config.update(val_image_extensions=SETTINGS['val_image_extensions'], depth_extensions=SETTINGS['depth_extensions'])
+    pairs = paired_files(SETTINGS['val_y'], SETTINGS['val_depth'], config=config)
     evaluate(net, config, pairs, folder, SETTINGS['device'],
              Path(CHECKPOINT).stem)

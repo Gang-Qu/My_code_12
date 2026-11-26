@@ -2,6 +2,10 @@ SETTINGS = dict(
     train_y='data/train/measurement', train_depth='data/train/depth',
     val_y='data/val/measurement', val_depth='data/val/depth',
     real_dir='data/real', prepared_dir='data/prepared_12', output='output',
+    train_image_extensions=['.tif', '.tiff'],
+    val_image_extensions=['.tif', '.tiff', '.png', '.jpg', '.jpeg', '.bmp'],
+    real_image_extensions=['.tif', '.tiff', '.png', '.jpg', '.jpeg', '.bmp'],
+    depth_extensions=['.tif', '.tiff'],  # paired train/validation depth labels
     expected_hw=[1536, 2500],  # H,W; None keeps native resolution
     center_crop_hw=[1036, 2072],  # H,W after resize; None keeps the full grid
     resize_before_inference_crop=False,  # test/real: center crop native input by default

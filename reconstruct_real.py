@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-from data import image_files, measurement, resize_measurement, center_region
+from data import configured_extensions, image_files, measurement, resize_measurement, center_region
 from model import DepthModel, load_matching_tensors
 from outputs import save_result
 from sampling import RULE, LEGACY_RULE, LEARNED_RULE
@@ -40,7 +40,8 @@ def geometry(y, c, meta=None):
 
 def run_real(net, c, folder, device):
     net.eval()
-    for i, image in enumerate(image_files(c['real_dir'])):
+    extensions = configured_extensions(c, 'real_image_extensions')
+    for i, image in enumerate(image_files(c['real_dir'], extensions=extensions)):
         y, valid = measurement(image, c)
         source_hw = y.shape
         if c.get('resize_before_inference_crop', False):
@@ -77,5 +78,5 @@ if __name__ == '__main__':
     folder = Path(SETTINGS['output']) / 'real' / datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     net, config = load_checkpoint(CHECKPOINT, SETTINGS['device'], strict=SETTINGS['strict_inference_weights'],
                                   report_path=folder / 'weight_load.json')
-    config.update(real_dir=SETTINGS['real_dir'], inference_batch_size=SETTINGS['inference_batch_size'])
+    config.update(real_image_extensions=SETTINGS['real_image_extensions'], real_dir=SETTINGS['real_dir'], inference_batch_size=SETTINGS['inference_batch_size'])
     run_real(net, config, folder, SETTINGS['device'])

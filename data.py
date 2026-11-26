@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from PIL import Image
 import tifffile
+from settings import SETTINGS
 
 TIFF_EXT = {'.tif', '.tiff'}
 EXT = TIFF_EXT | {'.png', '.jpg', '.jpeg', '.bmp'}
@@ -49,7 +50,7 @@ def model_input(y):
 def resize_pair(y, measurement_valid, depth, expected_hw):
     """Map registered, full-field measurement and depth onto the preparation grid."""
     if depth.ndim != 2:
-        raise ValueError(f'Expected single-channel metric depth TIFF, got {depth.shape}')
+        raise ValueError(f'Expected single-channel metric depth image, got {depth.shape}')
     if expected_hw is None:
         if y.shape != depth.shape:
             raise ValueError(f'Measurement and depth shapes differ: {y.shape}, {depth.shape}')
@@ -89,17 +90,32 @@ def center_region(source_hw, resized_hw, c):
                         crop_origin_yx=[r, col], hw=[ch,cw])
 
 
-def paired_files(image_dir, depth_dir, *, training=False):
-    files = image_files(image_dir, extensions=TIFF_EXT if training else EXT)
+def configured_extensions(config, key):
+    values = config.get(key, SETTINGS[key])
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, (list, tuple)) or not values or not all(isinstance(v, str) for v in values):
+        raise ValueError(f'{key}: expected an extension or a nonempty list of extensions')
+    extensions = {'.' + v.strip().lower().removeprefix('.') for v in values}
+    if not extensions <= EXT:
+        raise ValueError(f'{key}: unsupported extensions {sorted(extensions - EXT)}; supported: {sorted(EXT)}')
+    return extensions
+
+
+def paired_files(image_dir, depth_dir, *, training=False, config=None):
+    c = SETTINGS if config is None else config
+    extensions = configured_extensions(c, 'train_image_extensions' if training else 'val_image_extensions')
+    depth_extensions = configured_extensions(c, 'depth_extensions')
+    files = image_files(image_dir, extensions=extensions)
     depths = {}
     for path in Path(depth_dir).iterdir():
-        if path.suffix.lower() in TIFF_EXT and path.is_file():
+        if path.suffix.lower() in depth_extensions and path.is_file():
             depths.setdefault(path.stem, []).append(path)
     pairs = []
     for image in files:
         matches = depths.get(image.stem, [])
         if len(matches) != 1:
-            raise ValueError(f'{image}: expected exactly one matching depth TIFF in {depth_dir}')
+            raise ValueError(f'{image}: expected exactly one matching depth file {sorted(depth_extensions)} in {depth_dir}; found {matches}')
         pairs.append((image, matches[0]))
     return pairs
 

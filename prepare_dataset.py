@@ -6,7 +6,7 @@ from tempfile import mkdtemp
 
 import numpy as np
 
-from data import paired_files, read_pair, keep_training_frame, train_depth_threshold
+from data import configured_extensions, paired_files, read_pair, keep_training_frame, train_depth_threshold
 from sampling import RULE, fixed_coords, gather
 from settings import SETTINGS
 from depth_audit import write_audit
@@ -33,7 +33,9 @@ def digest(path):
 def prepare(c):
     threshold = train_depth_threshold(c)
     manifest = dict(min_train_depth_percent=threshold, rule=RULE, preprocessing=signature(c), train=[], skipped_train=[])
-    pairs = paired_files(c['train_y'], c['train_depth'], training=True)
+    manifest['input_formats'] = {key: sorted(configured_extensions(c, key))
+                                for key in ('train_image_extensions', 'depth_extensions')}
+    pairs = paired_files(c['train_y'], c['train_depth'], training=True, config=c)
     root = Path(c['prepared_dir']).resolve()
     root.mkdir(parents=True, exist_ok=True)
     generation = Path(mkdtemp(prefix='frames-', dir=root))
