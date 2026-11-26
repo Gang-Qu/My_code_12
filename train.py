@@ -1,5 +1,7 @@
 """Train depth only. A shuffled training example contains one complete fixed partition."""
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from time import perf_counter
 import json
 import shutil
 import sys
@@ -164,6 +166,61 @@ def check_split_overlap(rows, pairs, c, raw, prefiltered):
                 raise ValueError('Duplicate measurement across train/test')
 
 
+def load_training_frame(row, c, raw, filter_frame, threshold):
+    if raw:
+        frame = read_pair(row['image'], row['depth'], c, training=True)
+        return None if filter_frame and not keep_training_frame(frame[3], threshold) else frame
+    with np.load(Path(c['prepared_dir']) / row['file']) as data:
+        valid = data['valid']
+        if filter_frame and not keep_training_frame(cached_frame_info(row, c, valid), threshold):
+            return None
+        return data['y'], data['depth'], valid, data['coords_yx']
+
+
+def training_frames(rows, order, c, raw, filter_frame, threshold):
+    """Yield in shuffle order, optionally overlapping one CPU read with training."""
+    def load(idx):
+        return load_training_frame(rows[idx], c, raw, filter_frame, threshold)
+
+    if not c.get('train_prefetch', False):
+        for idx in order:
+            started = perf_counter()
+            frame = load(idx)
+            yield idx, frame, perf_counter() - started
+        return
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        started = perf_counter()
+        pending = worker.submit(load, order[0])
+        for i, idx in enumerate(order):
+            frame = pending.result()
+            if i + 1 < len(order):
+                pending = worker.submit(load, order[i + 1])
+            yield idx, frame, perf_counter() - started
+            started = perf_counter()
+
+
+class TrainingStepTimer:
+    def __init__(self, device, read_wait):
+        self.device = device
+        self.times = dict(read_wait=read_wait)
+        self.synchronize()
+        if device.type == 'cuda':
+            torch.cuda.reset_peak_memory_stats(device)
+        self.start = perf_counter()
+
+    def synchronize(self):
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize(self.device)
+        elif self.device.type == 'mps':
+            torch.mps.synchronize()
+
+    def mark(self, stage):
+        self.synchronize()
+        now = perf_counter()
+        self.times[stage] = now - self.start
+        self.start = now
+
+
 def show_progress(epoch, epochs, step, steps, loss, metrics=None):
     tty = sys.stdout.isatty()
     if not tty and metrics is None:
@@ -188,6 +245,10 @@ def train(c):
     export_every = c.get('test_export_every', 1)
     if type(export_every) is not int or export_every < 1:
         raise ValueError('test_export_every must be a positive integer')
+    profile_limit = c.get('profile_train_steps', 0)
+    if type(profile_limit) is not int or profile_limit < 0:
+        raise ValueError('profile_train_steps must be a nonnegative integer')
+    profiled = 0
     threshold = train_depth_threshold(c)
     rows, skipped_at_prepare = training_records(c)
     raw_input = c.get('training_input', 'prepared') == 'raw'
@@ -228,41 +289,47 @@ def train(c):
             net.da.pretrained.eval()
         empty_indices = set()
         step = 0
-        for idx in torch.randperm(len(rows)).tolist():
-            row = rows[idx]
+        order = torch.randperm(len(rows)).tolist()
+        check_frame = not audit_enabled and epoch == 1
+        for idx, frame, read_wait in training_frames(rows, order, c, raw_input, check_frame, threshold):
+            if frame is None:
+                empty_indices.add(idx)
+                continue
+            timer = TrainingStepTimer(device, read_wait) if profiled < profile_limit else None
+            y, gt, valid = (torch.from_numpy(a).to(device) for a in frame[:3])
             if raw_input:
-                y, gt, valid, meta = read_pair(row['image'], row['depth'], c, training=True)
-                if not audit_enabled and epoch == 1 and not keep_training_frame(meta, threshold):
-                    empty_indices.add(idx)
-                    continue
-                y, gt, valid = (torch.from_numpy(a).to(device) for a in (y, gt, valid))
+                meta = frame[3]
+                hw = tuple(y.shape)
             else:
-                hw = tuple(row['hw'])
-                with np.load(Path(c['prepared_dir']) / row['file']) as frame:
-                    mask = frame['valid']
-                    if not audit_enabled and epoch == 1 and not keep_training_frame(cached_frame_info(row, c, mask), threshold):
-                        empty_indices.add(idx)
-                        continue
-                    valid = torch.from_numpy(mask).to(device)
-                    y, gt, coords = (torch.from_numpy(frame[k]).to(device)
-                                     for k in ('y', 'depth', 'coords_yx'))
+                hw = tuple(rows[idx]['hw'])
+                coords = torch.from_numpy(frame[3]).to(device)
                 if sample_online:
                     y = restore(y, coords, hw)
                 gt = restore(gt, coords, hw)
                 valid = restore(valid, coords, hw)
             step += 1
             opt.zero_grad(set_to_none=True)
+            if timer:
+                timer.mark('transfer_and_prepare')
             with torch.autocast(device_type=device.type, dtype=dtype, enabled=amp):
                 if sample_online:
                     pred = net.forward_frame(y, c['batch_size'])
                 else:
                     pred = net(y, coords, hw, c['batch_size'])
+            if timer:
+                timer.mark('forward')
             terms = loss_terms(pred[None], gt[None], valid[None], c)
+            if timer:
+                timer.mark('loss')
             scaler.scale(terms['loss']).backward()
+            if timer:
+                timer.mark('backward')
             scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(net.parameters(), 1., error_if_nonfinite=not amp)
             scaler.step(opt)
             scaler.update()
+            if timer:
+                timer.mark('optimizer')
             last_loss = terms['loss'].detach()
             if sys.stdout.isatty():
                 show_progress(epoch, c['epochs'], step, len(rows)-len(empty_indices), last_loss.item())
@@ -270,6 +337,27 @@ def train(c):
                 raw = (y if sample_online else restore(y, coords, hw)).cpu().numpy()
                 save_result(run/'train', f'epoch{epoch:03d}_iter{step:06d}', raw,
                             pred.detach().cpu().numpy(), geometry(raw, c, meta if raw_input else None), c, gt.cpu().numpy(), save_arrays=False)
+            if timer:
+                timer.mark('progress_and_preview')
+                profiled += 1
+                a, b = net.grid_xy
+                n = a*b
+                ph, pw = (hw[0]+b-1)//b, (hw[1]+a-1)//a
+                chunk = c['batch_size']
+                record = dict(epoch=epoch, step=step, hw=hw, phase_grid_xy=net.grid_xy,
+                              parts=n, part_hw=[ph, pw], spatial_tokens_per_part=((ph+13)//14)*((pw+13)//14),
+                              batch_size=chunk, da_chunks=(n + chunk - 1)//chunk, encoder=c['encoder'],
+                              freeze_da=c['freeze_da'], freeze_encoder=c['freeze_encoder'],
+                              phase_mask_mode=c['phase_mask_mode'], use_refiner=c['use_refiner'],
+                              device=str(device), amp=amp, checkpoint_da_activations=net.checkpoint_activations,
+                              prefetch=c.get('train_prefetch', False), seconds=timer.times,
+                              total_s=sum(timer.times.values()))
+                if device.type == 'cuda':
+                    record.update(gpu=torch.cuda.get_device_name(device),
+                                  device_total_mib=torch.cuda.get_device_properties(device).total_memory/2**20,
+                                  peak_allocated_mib=torch.cuda.max_memory_allocated(device)/2**20)
+                with (run / 'train_timing.jsonl').open('a', encoding='utf8') as stream:
+                    stream.write(json.dumps(record) + '\n')
         if not audit_enabled and epoch == 1 and (empty_indices or skipped_at_prepare):
             skipped = [r['source'] for r in skipped_at_prepare]
             for i in sorted(empty_indices):

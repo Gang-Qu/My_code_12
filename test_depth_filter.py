@@ -168,7 +168,8 @@ class DepthFilterTests(unittest.TestCase):
         torch.set_num_threads(2)
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            c = dict(self.fixture(root), dataset_audit=False, epochs=2, test_export_every=2)
+            c = dict(self.fixture(root), dataset_audit=False, epochs=2, test_export_every=2,
+                     train_prefetch=True, profile_train_steps=1, batch_size=6)
             torch.save(DepthModel(c, load_pretrained=False).da.state_dict(), c['da_weights'])
             with patch('depth_audit.depth_counts', side_effect=AssertionError('audit was enabled')):
                 for mode in ('raw', 'prepared'):
@@ -178,6 +179,11 @@ class DepthFilterTests(unittest.TestCase):
                         self.assertEqual(len(manifest['train']), 1)
                         self.assertFalse(list((root/'prep').rglob('depth_range_audit.json')))
                     run = train(c)
+                    timing, = (run/'train_timing.jsonl').read_text().splitlines()
+                    profile = json.loads(timing)
+                    self.assertEqual((profile['hw'], profile['parts'], profile['da_chunks']), ([28, 56], 8, 2))
+                    self.assertTrue(profile['prefetch'])
+                    self.assertGreater(profile['seconds']['backward'], 0)
                     self.assertFalse((run/'depth_range_audit.json').exists())
                     for epoch in (1, 2):
                         stats = json.loads((run/f'test/epoch{epoch:03d}/metrics.json').read_text())

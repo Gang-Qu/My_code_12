@@ -33,6 +33,8 @@ SETTINGS = dict(
     device='cuda', batch_size=2, inference_batch_size=1, epochs=20,
     inference_precision='float32',  # 'float16' / 'bfloat16' enable CUDA autocast for reconstruction
     fast_reconstruction_export=False,  # uncompressed NPZ and low-compression full-resolution PNG
+    profile_train_steps=0,  # e.g. 10: synchronized per-stage times for first N training updates
+    train_prefetch=False,  # overlap one CPU frame read with current training step
     profile_reconstruction=False,  # per-frame read, inference, metrics and export wall times
     lr_encoder=1e-6, lr_decoder=5e-6, lr_extra=1e-5, seed=41,
     checkpoint_da_activations=False,  # recompute DA microbatches on backward to reduce peak memory

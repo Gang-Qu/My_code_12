@@ -73,14 +73,14 @@ def loss_terms(pred, gt, valid, c):
     count = valid.sum()
     if count.item() == 0:
         raise ValueError('当前batch没有有效深度像素；检查预处理有效掩码与深度范围')
-    if not (torch.isfinite(gt[valid]) & (gt[valid] > 0)).all():
+    if not ((~valid) | (torch.isfinite(gt) & (gt > 0))).all():
         raise ValueError('loss: valid=True的真值必须是有限正米制深度')
     residual = torch.where(valid, pred, 0.) - torch.where(valid, gt, 0.)
     l1 = residual.abs().sum() / count
     horizontal = valid[..., :, 1:] & valid[..., :, :-1]
     vertical = valid[..., 1:, :] & valid[..., :-1, :]
-    edge_sum = ((residual[..., :, 1:] - residual[..., :, :-1])[horizontal].abs().sum()
-                + (residual[..., 1:, :] - residual[..., :-1, :])[vertical].abs().sum())
+    edge_sum = ((residual[..., :, 1:] - residual[..., :, :-1]).abs().masked_fill(~horizontal, 0).sum()
+                + (residual[..., 1:, :] - residual[..., :-1, :]).abs().masked_fill(~vertical, 0).sum())
     pairs = horizontal.sum() + vertical.sum()
     edge = edge_sum / pairs.clamp_min(1)  # zero valid pairs -> zero loss, no epsilon
     result = dict(loss=c['depth_l1_weight'] * l1 + c['depth_edge_weight'] * edge,

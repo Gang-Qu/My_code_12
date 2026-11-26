@@ -184,10 +184,14 @@ class DepthModel(nn.Module):
         device = torch.device(device)
         if self._grid_key != key or self._base_grid.device != device:
             self._base_grid = torch.from_numpy(fixed_coords(hw, self.mask_seed, self.grid_xy, persist=self.mask_mode == 'fixed')).to(device)
-            self._base_linear = None
-            if self._base_grid[..., 0].numel() == hw[0] * hw[1]:
-                y, x = self._base_grid.unbind(-1)
-                self._base_linear = (y.long() * hw[1] + x).reshape(-1)
+            y, x = self._base_grid.unbind(-1)
+            linear = (y.long() * hw[1] + x).reshape(-1)
+            pixels = hw[0] * hw[1]
+            if linear.numel() > pixels:
+                # Route each empty slot to its own zero after the real pixels.
+                # The padded grid is now a permutation, including at the edges.
+                linear.masked_scatter_(linear < 0, torch.arange(pixels, linear.numel(), device=device))
+            self._base_linear = linear
             self._grid_key = key
         return self._base_grid
 
@@ -209,7 +213,10 @@ class DepthModel(nn.Module):
             rows, cols = scatter_coords.unbind(-1)
             parts = frame[rows.clamp_min(0).long(), cols.clamp_min(0).long()].masked_fill(rows < 0, 0)
         else:
-            parts = frame.reshape(-1).index_select(0, linear).reshape(base.shape[:-1])
+            flat = frame.reshape(-1)
+            if linear.numel() > flat.numel():
+                flat = F.pad(flat, (0, linear.numel() - flat.numel()))
+            parts = flat.index_select(0, linear).reshape(base.shape[:-1])
         if train_mask:
             parts = self.mask.route(parts)
         preds = self._predict_all_parts(parts, coords, hw, chunk)
@@ -219,7 +226,8 @@ class DepthModel(nn.Module):
             coarse = restore(preds, scatter_coords, hw)
         else:
             # This permutation covers every destination exactly once.
-            coarse = preds.new_empty(linear.numel()).scatter_(0, linear, preds.reshape(-1)).reshape(hw)
+            restored = preds.new_empty(linear.numel()).scatter_(0, linear, preds.reshape(-1))
+            coarse = restored[:frame.numel()].reshape(hw)
         final = self._refine(coarse, frame)
         return (final, coords) if return_coords else final
 
