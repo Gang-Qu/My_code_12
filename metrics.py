@@ -89,7 +89,7 @@ def loss_terms(pred, gt, valid, c):
 
 
 def make_amp(c, device):
-    """AMP applies to training forward only. Evaluation remains FP32."""
+    """Configure training AMP. Reconstruction precision is set separately."""
     enabled = bool(c['amp'] and device.type == 'cuda')
     dtype = {'float16': torch.float16, 'bfloat16': torch.bfloat16}[c['amp_dtype']]
     if enabled and dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():

@@ -142,6 +142,7 @@ class LearnedMask(torch.nn.Module):
         count = grid_xy[0] * grid_xy[1]
         strides = [1 << i for i in range((count - 1).bit_length())]
         generator = torch.Generator().manual_seed(seed % (1 << 63))
+        self.tile_hw = tuple(tile_hw)
         self.stages = torch.nn.ModuleList(
             _PairSwap(count, stride, tile_hw, generator)
             for stride in strides + strides[:-1][::-1]
@@ -150,6 +151,19 @@ class LearnedMask(torch.nn.Module):
     def route(self, values, inverse=False):
         # Disjoint paired swaps are self-inverse; undo the stages in reverse order.
         stages = reversed(self.stages) if inverse else self.stages
+        count, h, w = values.shape[:3]
+        th, tw = self.tile_hw
+        if self.stages and not self.training and not torch.is_grad_enabled() and (h > th or w > tw):
+            # Each cell uses the switches at (row % th, col % tw). Compose their
+            # permutation on one tile, then move the full-size values only once.
+            order = torch.arange(count, device=values.device)[:, None, None]
+            order = order.expand(count, min(h, th), min(w, tw))
+            for stage in stages:
+                order = stage(order)
+            indices = order.repeat(1, (h + th - 1)//th, (w + tw - 1)//tw)[:, :h, :w]
+            if values.ndim == 4:
+                indices = indices.unsqueeze(-1).expand_as(values)
+            return values.gather(0, indices)
         for stage in stages:
             values = stage(values)
         return values

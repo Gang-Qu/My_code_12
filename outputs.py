@@ -13,27 +13,43 @@ def preview(path,y,z,c,gt=None,full_resolution=False):
     def depth(v):
         a=np.clip((v-c['depth_min'])/(c['depth_max']-c['depth_min']),0,1)
         a=np.nan_to_num(a);return np.stack((a,np.sqrt(a),1-a),-1)
-    panels=[np.repeat(np.clip(y,0,1)[...,None],3,axis=-1),depth(z)]
-    labels=['Measurement','Depth (m)']
-    if gt is not None:panels.append(depth(gt));labels.append('GT (m)')
-    arr=np.concatenate(panels,axis=1);im=Image.fromarray((arr*255).round().astype(np.uint8))
-    # Compact PNG preview; full arrays are in TIFF/NPZ.
+    panels = [y, z] if gt is None else [y, z, gt]
+    labels = ['Measurement', 'Depth (m)', 'GT (m)'][:len(panels)]
+    h, w = y.shape
+    width, height = w * len(panels), h
+
+    def paste_panel(canvas, index, x, top):
+        # Bound scratch space to a strip even for 15 MP measurements.
+        for row in range(0, h, 128):
+            strip = panels[index][row:row+128]
+            values = np.clip(strip, 0, 1) if index == 0 else depth(strip)
+            piece = Image.fromarray((values * 255).round().astype(np.uint8))
+            canvas.paste(piece, (x, top + row))
+
     if not full_resolution:
+        im = Image.new('RGB', (width, height))
+        for i in range(len(panels)):
+            paste_panel(im, i, i*w, 0)
         im.thumbnail((1800,900))
+        width, height = im.size
     lo,hi=float(c['depth_min']),float(c['depth_max'])
     ticks=np.arange(np.ceil(lo/.25),np.floor(hi/.25)+1)*.25
     # One identical continuous scale beside each depth panel. Leave sufficient
     # vertical spacing for 0.25 m labels, even for small preview images.
-    bar_h=max(im.height, int(np.ceil((hi-lo)/.25))*16+1)
+    bar_h=max(height, int(np.ceil((hi-lo)/.25))*16+1)
     gap=PREVIEW_GAP
-    canvas=Image.new('RGB',(im.width+gap*(len(panels)-1),bar_h+40),'white')
+    canvas=Image.new('RGB',(width+gap*(len(panels)-1),bar_h+40),'white')
     draw=ImageDraw.Draw(canvas)
     offset=0
     for i,label in enumerate(labels):
-        left=i*im.width//len(panels);right=(i+1)*im.width//len(panels)
-        piece=im.crop((left,0,right,im.height))
-        canvas.paste(piece,(offset,PREVIEW_TOP));draw.text((offset+5,5),label,fill='black')
-        offset+=piece.width
+        left = i * width // len(panels)
+        right = (i+1) * width // len(panels)
+        if full_resolution:
+            paste_panel(canvas, i, offset, PREVIEW_TOP)
+        else:
+            canvas.paste(im.crop((left, 0, right, height)), (offset, PREVIEW_TOP))
+        draw.text((offset+5,5), label, fill='black')
+        offset += right - left
         if i:
             x=offset+8;top=PREVIEW_TOP
             ramp=np.linspace(hi,lo,bar_h,dtype=np.float32)[:,None]
@@ -46,7 +62,7 @@ def preview(path,y,z,c,gt=None,full_resolution=False):
                 draw.text((x+24,yy-5),f'{value:.2f}',fill='black')
             draw.text((x,8),'m',fill='black')
             offset+=gap
-    canvas.save(path)
+    canvas.save(path, compress_level=1 if c.get('fast_reconstruction_export', False) else 6)
 
 def read_test_panels(path):
     """Extract full-size RGB depth panels from a save_result test PNG."""
@@ -79,12 +95,13 @@ def read_test_panels(path):
 def save_result(folder,name,y,z,g,c,gt=None,save_arrays=True):
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
     if save_arrays:
-        tifffile.imwrite(folder/(name+'_depth_m.tiff'),z.astype(np.float32),photometric='minisblack')
+        tifffile.imwrite(folder/(name+'_depth_m.tiff'),z.astype(np.float32, copy=False),photometric='minisblack')
         metadata = dict(g, phase_mask_mode=c.get('phase_mask_mode', 'regular'),
                         phase_mask_seed=c.get('phase_mask_seed'))
         arrays = dict(measurement=y, depth_m=z, geometry_json=np.asarray(json.dumps(metadata)))
         if gt is not None:arrays['gt_m']=gt
-        np.savez_compressed(folder/(name+'.npz'),**arrays)
+        save_npz = np.savez if c.get('fast_reconstruction_export', False) else np.savez_compressed
+        save_npz(folder/(name+'.npz'), **arrays)
     preview(folder/(name+'.png'),y,z,c,gt,full_resolution=True)
 
 def plot_test_bins(folder, result):
